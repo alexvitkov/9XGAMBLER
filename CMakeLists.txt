@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 4.0)
+project(slots)
+
+add_executable(slots
+    src/main.cpp)
+
+
+set(raylib_USE_STATIC_LIBS ON CACHE BOOL "")
+add_subdirectory(vendor/raylib-5.5)
+
+target_link_libraries(slots raylib)
