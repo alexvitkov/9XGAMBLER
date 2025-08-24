@@ -39,6 +39,7 @@ const char* game_title = "9X GAMBLER";
 int screen_width = 1024;
 int screen_height = 768;
 float screen_scale;
+Camera2D camera;
 Vector2 mouse;
 double game_time = 0;
 double dt = 0;
@@ -85,16 +86,27 @@ struct SlotBuffer {
 
         return buffer;
     }
+
+    void advance(int reel, int new_tile) {
+        for (i32 row = rows - 1; row >= 1; row--)
+            buffer[reel][row] = buffer[reel][row-1];
+         buffer[reel][0] = new_tile;
+    }
 };
 
 struct Slot {
-    Rectangle     rect     = {};
-    bool          spinning = false;
-    Money         stake    = 1;
-    SlotBuffer    buffer   = {};
-    int           reels    = {};
-    int           rows     = {};
-    Weights<int>  weights  = {};
+    Rectangle         rect       = {};
+    bool              spinning   = false;
+    Money             stake      = 1;
+    SlotBuffer        buffer     = {};
+    int               reels      = {};
+    int               rows       = {};
+    Weights<int>      weights    = {};
+    float             speed      = 300;
+    float             row_height = 40;
+
+    float offsets[MAX_SLOT_REELS]       = {};
+    i32   upper_buffer[MAX_SLOT_REELS]  = {};
 
     void spin(Vector2 pos);
     void update();
@@ -149,6 +161,9 @@ void Machine::shake() {
 }
 
 void Slot::spin(Vector2 pos) {
+    for (i32 reel = 0; reel < reels; reel++)
+        upper_buffer[reel] = weights.generate();
+
     if (!spinning) {
         spinning = true;
         gain_money(-stake, pos);
@@ -156,6 +171,18 @@ void Slot::spin(Vector2 pos) {
 }
 
 void Slot::update() {
+    if (spinning) {
+        for (i32 reel = 0; reel < reels; reel++) {
+            offsets[reel] += speed * dt;
+
+            while (offsets[reel] > row_height) {
+                buffer.advance(reel, upper_buffer[reel]);
+                upper_buffer[reel] = weights.generate();
+                offsets[reel] -= row_height;
+            }
+        }
+    }
+
     DrawRectangleRec(rect, BLACK);
 
     float avail_space_x = rect.width - reels * 40;
@@ -163,18 +190,25 @@ void Slot::update() {
     float gap_x = avail_space_x / (reels + 1);
     float gap_y = avail_space_y / (rows + 1);
 
+    row_height = 40 + gap_y;
+
+    Vector2 scissor_pos = GetWorldToScreen2D({rect.x, rect.y}, camera);
+    BeginScissorMode(scissor_pos.x, scissor_pos.y, rect.width * camera.zoom, rect.height * camera.zoom);
+
     for (i32 reel = 0; reel < reels; reel++) {
-        for (i32 row = 0; row < rows; row++) {
+        for (i32 row = -1; row < rows; row++) {
+            i32 tile = row >= 0 ? buffer.buffer[reel][row] : upper_buffer[reel];
+
             Vector2 pos = {
                 .x = this->rect.x + gap_x * (reel + 1) + reel * 40,
-                .y = this->rect.y + gap_y * (row + 1) + row * 40,
+                .y = this->rect.y + gap_y * (row + 1) + row * 40 + offsets[reel],
             };
 
-            DrawTexture(tex_tiles[buffer.buffer[reel][row]], pos.x, pos.y, WHITE);
-            
-            printf("%d\n", reels);
+            DrawTexture(tex_tiles[tile], pos.x, pos.y, WHITE);
         }
     }
+
+    EndScissorMode();
 }
 
 M3X1::M3X1() {
@@ -184,7 +218,7 @@ M3X1::M3X1() {
     slot.weights.add(1, 5);
     slot.weights.add(2, 4);
     slot.weights.add(3, 3);
-    slot.buffer = SlotBuffer::generate(3, 1, slot.weights);
+    slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
 }
 
 void M3X1::update() {
@@ -200,6 +234,7 @@ void M3X1::update() {
 
     Color color = { 0, 0, 255, 255 };
     slot.rect = { pos.x + 10, pos.y + 60, 164, 86 };
+    //slot.rect = { pos.x + 10, pos.y + 60, 220, 130 };
 
     if (slot.spinning) {
         button.y += 12;
@@ -275,7 +310,7 @@ int main() {
 
     while (!WindowShouldClose()) {
 
-        Camera2D camera = {
+        camera = {
         };
 
         // --- Update viewport ----------------------------------------
@@ -303,7 +338,7 @@ int main() {
         BeginDrawing();
 
         BeginMode2D(camera);
-        ClearBackground(BLACK);
+        ClearBackground({22,0,50,255});
 
         mouse = GetScreenToWorld2D(GetMousePosition(), camera);
         game_time = GetTime();
