@@ -132,9 +132,18 @@ struct Slot {
 struct M3X1 : Machine {
     Slot slot = {};
     bool anticipation = false;
-    double payouts[TILE_COUNT] = { 0, 7, 20, 30, 40, 50 };
+    double payouts[TILE_COUNT] = { 0, 7, 20, 40 };
 
     M3X1();
+    virtual void update();
+    virtual void calculate_ev();
+};
+
+struct M1X1 : Machine {
+    Slot slot = {};
+    double payouts[TILE_COUNT] = { 0, 0, 2, 3, 8 };
+
+    M1X1();
     virtual void update();
     virtual void calculate_ev();
 };
@@ -152,6 +161,7 @@ struct TextOnScreen {
 
 Texture tex_background;
 Texture tex_m3x1;
+Texture tex_m1x1;
 Texture tex_tiles[TILE_COUNT];
 
 // --- Renderer State -----------------------------------------
@@ -303,6 +313,43 @@ M3X1::M3X1() {
     printf("Spawned machien with %.2f%% RTP and %.2f%% win change.\n", ev*100, win_percent*100);
 }
 
+M1X1::M1X1() {
+    slot.machine = this;
+    slot.stake   = 10;
+    slot.reels   = 1;
+    slot.rows    = 1;
+    slot.speed   = 500;
+    slot.spin_distance = 15;
+
+    slot.weights.add(1, 6);
+    slot.weights.add(2, 3);
+    slot.weights.add(3, 2);
+    slot.weights.add(4, 1);
+    slot.buffer  = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+
+    slot.win_algo = [](Slot* slot) -> Money {
+        M1X1* m3x1 = (M1X1*)slot->machine;
+        return m3x1->payouts[slot->buffer.at(0,0)] * slot->stake;
+    };
+    calculate_ev();
+    printf("Spawned machien with %.2f%% RTP and %.2f%% win change.\n", ev*100, win_percent*100);
+}
+
+void M1X1::calculate_ev() {
+    SlotBuffer buffer;
+    Money total = 0;
+    int spins = 100000;
+    int no_wins = 0;
+    for (i32 i = 0; i < spins; i++) {
+        slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+        Money win = slot.win_algo(&slot) / slot.stake;
+        if (!win) no_wins++;
+        total += win;
+    }
+    this->ev = double(total) / spins;
+    this->win_percent = double(spins - no_wins) / double(spins);
+}
+
 void M3X1::calculate_ev() {
     SlotBuffer buffer;
     Money total = 0;
@@ -319,7 +366,6 @@ void M3X1::calculate_ev() {
 }
 
 void M3X1::update() {
-
     if (slot.spinning) shake();
 
     Rectangle button = {
@@ -336,7 +382,7 @@ void M3X1::update() {
     if (slot.spinning) {
         button.y += 12;
         button.height -= 12;
-        color = { 0, 0, 160, 180 };
+        color = { 0, 0, 160, 80 };
 
         // DrawRectangleRec(rect, BLACK);
     }
@@ -360,6 +406,41 @@ void M3X1::update() {
         Color color = (t - floor(t) < 0.5) ? Color{54, 16, 112,255} : Color{117, 21, 143,255};
         DrawRectangleRec(slot.get_reel_rect(2), color);
     }
+    slot.update();
+}
+
+void M1X1::update() {
+    if (slot.spinning) shake();
+
+    Rectangle button = {
+        .x = pos.x + float(MACHINE_WIDTH - BUTTON_WIDTH) / 2,
+        .y = pos.y + float(MACHINE_HEIGHT - BUTTON_HEIGHT) - 8,
+        .width = float(BUTTON_WIDTH),
+        .height = float(BUTTON_HEIGHT),
+    };
+
+    Color color = { 0, 0, 255, 255 };
+    slot.rect = { pos.x + 10, pos.y + 60, 164, 86 };
+    //slot.rect = { pos.x + 10, pos.y + 60, 220, 130 };
+
+    if (slot.spinning) {
+        button.y += 12;
+        button.height -= 12;
+        color = { 0, 0, 160, 80 };
+    }
+    else {
+        if (CheckCollisionPointRec(mouse, button)) {
+            color = Color { 32, 80, 255, 255 };
+
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                slot.spin({button.x, button.y});
+            }
+        }
+    }
+
+    DrawTexture(tex_m1x1, pos.x, pos.y - 9, WHITE);
+    DrawRectangleRec(button, color);
+    DrawText("SPIN", button.x + 6, button.y + 10, 20, WHITE);
     slot.update();
 }
 
@@ -398,6 +479,7 @@ int main() {
 
     // --- Load Assets --------------------------------------------
     tex_background = LoadTexture("assets/background.png");
+    tex_m1x1 = LoadTexture("assets/m1x1.png");
     tex_m3x1 = LoadTexture("assets/m3x1.png");
 
     tex_tiles[0] = LoadTexture("assets/tile0.png");
@@ -408,8 +490,12 @@ int main() {
     tex_tiles[5] = LoadTexture("assets/tile5.png");
 
     // --- Init gameplay ------------------------------------------
+
+    M1X1* m1x1 = new M1X1();
+    machines[0] = m1x1;
     M3X1* m3x1 = new M3X1();
-    machines[0] = m3x1;
+    machines[1] = m3x1;
+
     display_money = money;
 
 
