@@ -46,12 +46,15 @@ double dt = 0;
 
 struct Machine {
     Vector2 pos;
+    double ev = 0;
+    double win_percent = 0;
 
     int shake_x = 0;
     int shake_y = 0;
     double shake_time = 0;
 
     virtual void update() = 0;
+    virtual void calculate_ev() = 0;
 
     void shake();
 };
@@ -114,7 +117,7 @@ struct Slot {
     float             row_height       = 40;
     int               current_spin_distance = 0;
 
-    void (*win_algo)(Slot* slot) = 0;
+    Money (*win_algo)(Slot* slot) = 0;
     void (*stop_callback)(Slot* slot, int reel) = 0;
 
     float offsets[MAX_SLOT_REELS]       = {};
@@ -129,9 +132,11 @@ struct Slot {
 struct M3X1 : Machine {
     Slot slot = {};
     bool anticipation = false;
+    double payouts[TILE_COUNT] = { 0, 7, 20, 30, 40, 50 };
 
     M3X1();
     virtual void update();
+    virtual void calculate_ev();
 };
 
 struct TextOnScreen {
@@ -156,7 +161,7 @@ std::vector<TextOnScreen> texts;
 // --- Gameplay State -----------------------------------------
 
 Machine* machines[9] = {};
-Money money = 100;
+Money money = 500;
 double display_money = 0;
 
 void gain_money(Money money, Vector2 pos);
@@ -174,6 +179,7 @@ void Machine::shake() {
     pos.x += shake_x;
     pos.y += shake_y;
 }
+
 
 void Slot::spin(Vector2 pos) {
     if (!spinning) {
@@ -228,7 +234,7 @@ void Slot::update() {
         }
         if (done) {
             spinning = false;
-            win_algo(this);
+            gain_money(win_algo(this), { rect.x, rect.y });
         }
     }
 
@@ -269,9 +275,15 @@ M3X1::M3X1() {
     slot.weights.add(3, 2);
     slot.buffer  = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
 
-    slot.win_algo = [](Slot* slot) {
+    slot.win_algo = [](Slot* slot) -> Money {
+        M3X1* m3x1 = (M3X1*)slot->machine;
+
+        Money win = 0;
         if (slot->buffer.at(0,0) == slot->buffer.at(1,0) && slot->buffer.at(1,0) == slot->buffer.at(2,0)) {
-            gain_money(100, { slot->rect.x, slot->rect.y });
+            return m3x1->payouts[slot->buffer.at(0,0)] * slot->stake;
+        }
+        else {
+            return 0;
         }
     };
     slot.stop_callback = [](Slot* slot, int reel) {
@@ -286,6 +298,24 @@ M3X1::M3X1() {
             m3x1->anticipation = false;
         }
     };
+
+    calculate_ev();
+    printf("Spawned machien with %.2f%% RTP and %.2f%% win change.\n", ev*100, win_percent*100);
+}
+
+void M3X1::calculate_ev() {
+    SlotBuffer buffer;
+    Money total = 0;
+    int spins = 100000;
+    int no_wins = 0;
+    for (i32 i = 0; i < spins; i++) {
+        slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+        Money win = slot.win_algo(&slot) / slot.stake;
+        if (!win) no_wins++;
+        total += win;
+    }
+    this->ev = double(total) / spins;
+    this->win_percent = double(spins - no_wins) / double(spins);
 }
 
 void M3X1::update() {
@@ -334,6 +364,8 @@ void M3X1::update() {
 }
 
 void gain_money(Money amount, Vector2 pos) {
+    if (amount == 0) return;
+
     pos.y -= 10;
     money += amount;
 
@@ -377,9 +409,7 @@ int main() {
 
     // --- Init gameplay ------------------------------------------
     M3X1* m3x1 = new M3X1();
-    M3X1* m3x1_2 = new M3X1();
     machines[0] = m3x1;
-    machines[1] = m3x1_2;
     display_money = money;
 
 
@@ -474,7 +504,7 @@ int main() {
         EndMode2D();
 
 
-        if (0) { // FPS Counter
+        if (1) { // FPS Counter
             char buf[64];
             snprintf(buf, 64, "FPS: %d", GetFPS());
             DrawText(buf, 8, 8, 20, WHITE);
