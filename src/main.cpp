@@ -95,18 +95,23 @@ struct SlotBuffer {
 };
 
 struct Slot {
-    Rectangle         rect       = {};
-    bool              spinning   = false;
-    Money             stake      = 1;
-    SlotBuffer        buffer     = {};
-    int               reels      = {};
-    int               rows       = {};
-    Weights<int>      weights    = {};
-    float             speed      = 300;
-    float             row_height = 40;
+    Rectangle         rect             = {};
+    bool              spinning         = false;
+    float             spin_time        = 0;
+    float             reel_offset_time = 0.1;
+    int               spin_distance    = 10;
+    Money             stake            = 1;
+    SlotBuffer        buffer           = {};
+    int               reels            = {};
+    int               rows             = {};
+    Weights<int>      weights          = {};
+    float             speed            = 300;
+    float             row_height       = 40;
+    void (*win_algo)(Slot* slot) = 0;
 
     float offsets[MAX_SLOT_REELS]       = {};
     i32   upper_buffer[MAX_SLOT_REELS]  = {};
+    i32   spin_iter[MAX_SLOT_REELS]     = {};
 
     void spin(Vector2 pos);
     void update();
@@ -125,9 +130,9 @@ struct TextOnScreen {
     float       t        = 0;
     float       duration = 4;
     Color       color    = WHITE;
-    float       size     = 20;
-    Vector2     velocity = {0, -300};
-    float       gravity  = 2000;
+    float       size     = 40;
+    Vector2     velocity = {0, -100};
+    float       gravity  = 1000;
 };
 
 Texture tex_background;
@@ -161,25 +166,41 @@ void Machine::shake() {
 }
 
 void Slot::spin(Vector2 pos) {
-    for (i32 reel = 0; reel < reels; reel++)
-        upper_buffer[reel] = weights.generate();
-
     if (!spinning) {
+        for (i32 reel = 0; reel < reels; reel++) {
+            upper_buffer[reel] = weights.generate();
+            spin_iter[reel] = 0;
+        }
+
         spinning = true;
+        spin_time = 0;
         gain_money(-stake, pos);
     }
 }
 
 void Slot::update() {
     if (spinning) {
+        spin_time += dt;
+
+        bool done = true;
         for (i32 reel = 0; reel < reels; reel++) {
+            if (spin_time < reel_offset_time * reel) continue;
+            if (spin_iter[reel] == spin_distance)
+                continue;
+
+            done = false;
             offsets[reel] += speed * dt;
 
             while (offsets[reel] > row_height) {
                 buffer.advance(reel, upper_buffer[reel]);
                 upper_buffer[reel] = weights.generate();
                 offsets[reel] -= row_height;
+                spin_iter[reel]++;
             }
+        }
+        if (done) {
+            spinning = false;
+            win_algo(this);
         }
     }
 
@@ -216,9 +237,15 @@ M3X1::M3X1() {
     slot.reels = 3;
     slot.rows = 1;
     slot.weights.add(1, 5);
-    slot.weights.add(2, 4);
-    slot.weights.add(3, 3);
+    slot.weights.add(2, 3);
+    slot.weights.add(3, 2);
     slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+
+    slot.win_algo = [](Slot* slot) {
+        if (slot->buffer.buffer[0][0] == slot->buffer.buffer[1][0] && slot->buffer.buffer[0][0] == slot->buffer.buffer[2][0]) {
+            gain_money(100, { slot->rect.x, slot->rect.y });
+        }
+    };
 }
 
 void M3X1::update() {
