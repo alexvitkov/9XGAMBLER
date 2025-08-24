@@ -1,10 +1,11 @@
 #include "raylib.h"
-#include <string.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
 #include <vector>
-
+#include <string>
+#include <format>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
@@ -20,83 +21,166 @@
 #define BUTTON_WIDTH 60
 #define BUTTON_HEIGHT 48
 
-struct Machine {
-    int x = 0;
-    int y = 0;
+typedef uint8_t  u8;
+typedef uint16_t u16;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int8_t   i8;
+typedef int16_t  i16;
+typedef int32_t  i32;
+typedef int64_t  i64;
 
-    virtual void update() = 0;
-};
+typedef i64 Money;
 
 const char* game_title = "9X GAMBLER";
 int screen_width = 1024;
 int screen_height = 768;
 float screen_scale;
 Vector2 mouse;
+double game_time = 0;
+double dt = 0;
 
-Texture tex_background;
-Texture tex_m3x1;
+struct Machine {
+    Vector2 pos;
 
-// --- Gameplay State -----------------------------------------
-Machine* machines[9] = {};
-int64_t money = 100;
+    int shake_x = 0;
+    int shake_y = 0;
+    double shake_time = 0;
+
+    virtual void update() = 0;
+
+    void shake();
+};
 
 struct Slot {
+    Vector2 pos;
     bool spinning = false;
+    Money stake = 1;
 
-    void spin() {
-        spinning = true;
-    }
-
-    void update() {
-    }
+    void spin(Vector2 pos);
+    void update();
 };
 
 struct M3x1 : Machine {
     Slot slot = {};
-
-    virtual void update() {
-        slot.update();
-
-        DrawRectangle(x, y, MACHINE_WIDTH, MACHINE_HEIGHT, RED);
-
-        Rectangle button = {
-            .x = x + float(MACHINE_WIDTH - BUTTON_WIDTH) / 2,
-            .y = y + float(MACHINE_HEIGHT - BUTTON_HEIGHT) - 8,
-            .width = float(BUTTON_WIDTH),
-            .height = float(BUTTON_HEIGHT),
-        };
-
-        Color color = { 0, 0, 255, 255 };
-
-        if (slot.spinning) {
-            button.y += 12;
-            button.height -= 12;
-            color = { 0, 0, 160, 180 };
-        }
-        else {
-            if (CheckCollisionPointRec(mouse, button)) {
-                color = Color { 32, 80, 255, 255 };
-
-                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                    slot.spin();
-                }
-            }
-        }
-
-        DrawTexture(tex_m3x1, x, y - 9, WHITE);
-
-        DrawRectangleRec(button, color);
-        DrawText("SPIN", button.x + 6, button.y + 10, 20, WHITE);
-    };
+    virtual void update();
 };
 
+struct TextOnScreen {
+    std::string text     = 0;
+    Vector2     pos      = {};
+    float       t        = 0;
+    float       duration = 4;
+    Color       color    = WHITE;
+    float       size     = 20;
+    Vector2     velocity = {0, -300};
+    float       gravity  = 1400;
+};
 
+Texture tex_background;
+Texture tex_m3x1;
+
+// --- Renderer State -----------------------------------------
+
+std::vector<TextOnScreen> texts;
+
+// --- Gameplay State -----------------------------------------
+
+Machine* machines[9] = {};
+Money money = 100;
+
+void gain_money(Money money, Vector2 pos);
+float Lerp(float a, float b, float t);
+float Remap(float val, float old_min, float old_max, float new_min, float new_max);
+
+// --- Gameplay Methods ---------------------------------------
+
+void Machine::shake() {
+    if (game_time - shake_time > 0.02) {
+        shake_time = game_time;
+        shake_x = GetRandomValue(-1, 1);
+        shake_y = GetRandomValue(-2, 2);
+    }
+    pos.x += shake_x;
+    pos.y += shake_y;
+}
+
+void Slot::spin(Vector2 pos) {
+    if (!spinning) {
+        spinning = true;
+        gain_money(-stake, pos);
+    }
+}
+
+void Slot::update() {
+}
+
+void M3x1::update() {
+    slot.update();
+
+    if (slot.spinning) shake();
+
+    Rectangle button = {
+        .x = pos.x + float(MACHINE_WIDTH - BUTTON_WIDTH) / 2,
+        .y = pos.y + float(MACHINE_HEIGHT - BUTTON_HEIGHT) - 8,
+        .width = float(BUTTON_WIDTH),
+        .height = float(BUTTON_HEIGHT),
+    };
+
+    Color color = { 0, 0, 255, 255 };
+    slot.pos = pos;
+
+    if (slot.spinning) {
+        button.y += 12;
+        button.height -= 12;
+        color = { 0, 0, 160, 180 };
+    }
+    else {
+        if (CheckCollisionPointRec(mouse, button)) {
+            color = Color { 32, 80, 255, 255 };
+
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                slot.spin({button.x, button.y});
+            }
+        }
+    }
+
+    DrawTexture(tex_m3x1, pos.x, pos.y - 9, WHITE);
+
+    DrawRectangleRec(button, color);
+    DrawText("SPIN", button.x + 6, button.y + 10, 20, WHITE);
+}
+
+void gain_money(Money amount, Vector2 pos) {
+    pos.y -= 10;
+    money += amount;
+
+    bool neg = amount < 0;
+    if (neg) amount = -amount;
+
+    TextOnScreen text {
+        .text     = std::format("{}${}", neg ? "-" : "+", amount),
+        .pos      = pos,
+        .color    = neg ? RED : GREEN,
+    };
+    text.velocity.x = GetRandomValue(-100, 100);
+    texts.push_back(text);
+}
+
+float Lerp(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+float Remap(float val, float old_min, float old_max, float new_min, float new_max) {
+    float t = (val - old_min) / (old_max-old_min);
+    return lerp(new_min, new_max, t);
+}
 
 int main() {
 
-    SetConfigFlags(FLAG_VSYNC_HINT  | FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_MAXIMIZED);
+    SetConfigFlags(/*FLAG_VSYNC_HINT  | */FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_MAXIMIZED);
     InitWindow(screen_width, screen_height, game_title);
-    // SetTargetFPS(60);
+    //SetTargetFPS(60);
 
     // --- Load Assets --------------------------------------------
     tex_background = LoadTexture("assets/background.png");
@@ -138,6 +222,8 @@ int main() {
         ClearBackground(BLACK);
 
         mouse = GetScreenToWorld2D(GetMousePosition(), camera);
+        game_time = GetTime();
+        dt = GetFrameTime();
 
         // Render Game
         {
@@ -149,12 +235,14 @@ int main() {
                 int x = TOP_PADDING + (i % 3) * (MACHINE_WIDTH + MACHINE_GAP_X);
                 int y = RIGHT_PADDING + (i / 3) * (MACHINE_HEIGHT + MACHINE_GAP_Y);
 
-                DrawRectangle(x, y, MACHINE_WIDTH, MACHINE_HEIGHT, Color{0, 0, 0, 90});
 
                 if (machine) {
-                    machine->x = x;
-                    machine->y = x;
+                    machine->pos.x = x;
+                    machine->pos.y = y;
                     machine->update();
+                }
+                else {
+                    DrawRectangle(x, y, MACHINE_WIDTH, MACHINE_HEIGHT, Color{0, 0, 0, 90});
                 }
             }
 
@@ -163,8 +251,31 @@ int main() {
             DrawText(buf, 714, 154, 40, WHITE);
         }
 
+        for (i32 i = 0; i < texts.size(); i++) {
+            TextOnScreen& text = texts[i];
+            float t = pow(text.t / text.duration, 2);
 
-        // DrawText("Hello, Gambler!", 0, 0, 24, WHITE);
+            text.pos.x += text.velocity.x * dt;
+            text.pos.y += text.velocity.y * dt;
+            text.velocity.y += text.gravity * dt;
+
+
+            Color color = text.color;
+            if (t > 0.8)
+                color.a = Remap(t, 0.8, 1, 255, 0);
+
+            DrawText(text.text.c_str(), text.pos.x, text.pos.y, text.size, {0,0,0,color.a});
+            DrawText(text.text.c_str(), text.pos.x + 1, text.pos.y, text.size, color);
+
+            text.t += GetFrameTime();
+
+            if (text.t > text.duration) {
+                texts[i] = texts.back();
+                texts.pop_back();
+                i--;
+            }
+        }
+
         EndMode2D();
 
 
@@ -179,3 +290,4 @@ int main() {
     CloseWindow();
     return 0;
 }
+
