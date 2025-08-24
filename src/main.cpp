@@ -87,6 +87,10 @@ struct SlotBuffer {
         return buffer;
     }
 
+    int& at(int reel, int row) {
+        return buffer[reel][row];
+    }
+
     void advance(int reel, int new_tile) {
         for (i32 row = rows - 1; row >= 1; row--)
             buffer[reel][row] = buffer[reel][row-1];
@@ -95,10 +99,11 @@ struct SlotBuffer {
 };
 
 struct Slot {
+    Machine*          machine          = nullptr;
     Rectangle         rect             = {};
     bool              spinning         = false;
     float             spin_time        = 0;
-    float             reel_offset_time = 0.1;
+    float             reel_offset_time = 0.3;
     int               spin_distance    = 10;
     Money             stake            = 1;
     SlotBuffer        buffer           = {};
@@ -107,18 +112,23 @@ struct Slot {
     Weights<int>      weights          = {};
     float             speed            = 300;
     float             row_height       = 40;
+    int               current_spin_distance = 0;
+
     void (*win_algo)(Slot* slot) = 0;
+    void (*stop_callback)(Slot* slot, int reel) = 0;
 
     float offsets[MAX_SLOT_REELS]       = {};
     i32   upper_buffer[MAX_SLOT_REELS]  = {};
     i32   spin_iter[MAX_SLOT_REELS]     = {};
 
+    Rectangle get_reel_rect(int reel);
     void spin(Vector2 pos);
     void update();
 };
 
 struct M3X1 : Machine {
     Slot slot = {};
+    bool anticipation = false;
 
     M3X1();
     virtual void update();
@@ -172,10 +182,23 @@ void Slot::spin(Vector2 pos) {
             spin_iter[reel] = 0;
         }
 
+        current_spin_distance = spin_distance;
         spinning = true;
         spin_time = 0;
         gain_money(-stake, pos);
     }
+}
+
+Rectangle Slot::get_reel_rect(int reel) {
+    float avail_space_x = rect.width - reels * 40;
+    float gap_x = avail_space_x / (reels + 1);
+
+    return Rectangle {
+        .x = this->rect.x + gap_x * (reel + 1) + reel * 40,
+        .y = this->rect.y,
+        .width = 40,
+        .height = this->rect.height,
+    };
 }
 
 void Slot::update() {
@@ -185,7 +208,7 @@ void Slot::update() {
         bool done = true;
         for (i32 reel = 0; reel < reels; reel++) {
             if (spin_time < reel_offset_time * reel) continue;
-            if (spin_iter[reel] == spin_distance)
+            if (spin_iter[reel] >= current_spin_distance)
                 continue;
 
             done = false;
@@ -195,7 +218,12 @@ void Slot::update() {
                 buffer.advance(reel, upper_buffer[reel]);
                 upper_buffer[reel] = weights.generate();
                 offsets[reel] -= row_height;
+
                 spin_iter[reel]++;
+                if (spin_iter[reel] == current_spin_distance && this->stop_callback) {
+                    spin_iter[reel] = 99999999; // set to high value in case current_spin_distance changes
+                    this->stop_callback(this, reel); 
+                }
             }
         }
         if (done) {
@@ -203,8 +231,6 @@ void Slot::update() {
             win_algo(this);
         }
     }
-
-    DrawRectangleRec(rect, BLACK);
 
     float avail_space_x = rect.width - reels * 40;
     float avail_space_y = rect.height - rows * 40;
@@ -233,17 +259,31 @@ void Slot::update() {
 }
 
 M3X1::M3X1() {
-    slot.stake = 10;
-    slot.reels = 3;
-    slot.rows = 1;
+    slot.machine = this;
+    slot.stake   = 10;
+    slot.reels   = 3;
+    slot.rows    = 1;
+
     slot.weights.add(1, 5);
     slot.weights.add(2, 3);
     slot.weights.add(3, 2);
-    slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+    slot.buffer  = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
 
     slot.win_algo = [](Slot* slot) {
-        if (slot->buffer.buffer[0][0] == slot->buffer.buffer[1][0] && slot->buffer.buffer[0][0] == slot->buffer.buffer[2][0]) {
+        if (slot->buffer.at(0,0) == slot->buffer.at(1,0) && slot->buffer.at(1,0) == slot->buffer.at(2,0)) {
             gain_money(100, { slot->rect.x, slot->rect.y });
+        }
+    };
+    slot.stop_callback = [](Slot* slot, int reel) {
+        M3X1* m3x1 = (M3X1*)slot->machine;
+
+        if (reel == 1 && slot->buffer.at(0,0) == slot->buffer.at(1,0)) {
+            slot->current_spin_distance += 10;
+            m3x1->anticipation = true;
+        }
+
+        if (reel == slot->reels - 1) {
+            m3x1->anticipation = false;
         }
     };
 }
@@ -267,6 +307,8 @@ void M3X1::update() {
         button.y += 12;
         button.height -= 12;
         color = { 0, 0, 160, 180 };
+
+        // DrawRectangleRec(rect, BLACK);
     }
     else {
         if (CheckCollisionPointRec(mouse, button)) {
@@ -282,6 +324,12 @@ void M3X1::update() {
 
     DrawRectangleRec(button, color);
     DrawText("SPIN", button.x + 6, button.y + 10, 20, WHITE);
+
+    if (anticipation) {
+        double t = game_time * 10;
+        Color color = (t - floor(t) < 0.5) ? Color{54, 16, 112,255} : Color{117, 21, 143,255};
+        DrawRectangleRec(slot.get_reel_rect(2), color);
+    }
     slot.update();
 }
 
