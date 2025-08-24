@@ -20,6 +20,9 @@
 #define RIGHT_PADDING 18
 #define BUTTON_WIDTH 60
 #define BUTTON_HEIGHT 48
+#define TILE_COUNT 6
+#define MAX_SLOT_REELS 10
+#define MAX_SLOT_ROWS  5
 
 typedef uint8_t  u8;
 typedef uint16_t u16;
@@ -52,17 +55,55 @@ struct Machine {
     void shake();
 };
 
+template <typename T>
+struct Weights {
+    std::vector<T> array;
+
+    void add(T entry, int weight) {
+        for (int i = 0; i < weight; i++)
+            array.push_back(entry);
+    }
+
+    int generate() {
+        return array[GetRandomValue(0, array.size() - 1)];
+    }
+};
+
+struct SlotBuffer {
+    int reels = 0;
+    int rows = 0;
+    int buffer[MAX_SLOT_REELS][MAX_SLOT_ROWS] = {};
+
+    static SlotBuffer generate(int reels, int rows, Weights<int>& weights) {
+        SlotBuffer buffer = { reels, rows };
+        buffer.reels = reels;
+        buffer.rows = rows;
+
+        for (i32 reel = 0; reel < reels; reel++)
+            for (i32 row = 0; row < reels; row++)
+                buffer.buffer[reel][row] = weights.generate();
+
+        return buffer;
+    }
+};
+
 struct Slot {
-    Vector2 pos;
-    bool spinning = false;
-    Money stake = 1;
+    Rectangle     rect     = {};
+    bool          spinning = false;
+    Money         stake    = 1;
+    SlotBuffer    buffer   = {};
+    int           reels    = {};
+    int           rows     = {};
+    Weights<int>  weights  = {};
 
     void spin(Vector2 pos);
     void update();
 };
 
-struct M3x1 : Machine {
+struct M3X1 : Machine {
     Slot slot = {};
+
+    M3X1();
     virtual void update();
 };
 
@@ -74,11 +115,12 @@ struct TextOnScreen {
     Color       color    = WHITE;
     float       size     = 20;
     Vector2     velocity = {0, -300};
-    float       gravity  = 1400;
+    float       gravity  = 2000;
 };
 
 Texture tex_background;
 Texture tex_m3x1;
+Texture tex_tiles[TILE_COUNT];
 
 // --- Renderer State -----------------------------------------
 
@@ -88,6 +130,7 @@ std::vector<TextOnScreen> texts;
 
 Machine* machines[9] = {};
 Money money = 100;
+double display_money = 0;
 
 void gain_money(Money money, Vector2 pos);
 float Lerp(float a, float b, float t);
@@ -113,10 +156,38 @@ void Slot::spin(Vector2 pos) {
 }
 
 void Slot::update() {
+    DrawRectangleRec(rect, BLACK);
+
+    float avail_space_x = rect.width - reels * 40;
+    float avail_space_y = rect.height - rows * 40;
+    float gap_x = avail_space_x / (reels + 1);
+    float gap_y = avail_space_y / (rows + 1);
+
+    for (i32 reel = 0; reel < reels; reel++) {
+        for (i32 row = 0; row < rows; row++) {
+            Vector2 pos = {
+                .x = this->rect.x + gap_x * (reel + 1) + reel * 40,
+                .y = this->rect.y + gap_y * (row + 1) + row * 40,
+            };
+
+            DrawTexture(tex_tiles[buffer.buffer[reel][row]], pos.x, pos.y, WHITE);
+            
+            printf("%d\n", reels);
+        }
+    }
 }
 
-void M3x1::update() {
-    slot.update();
+M3X1::M3X1() {
+    slot.stake = 10;
+    slot.reels = 3;
+    slot.rows = 1;
+    slot.weights.add(1, 5);
+    slot.weights.add(2, 4);
+    slot.weights.add(3, 3);
+    slot.buffer = SlotBuffer::generate(3, 1, slot.weights);
+}
+
+void M3X1::update() {
 
     if (slot.spinning) shake();
 
@@ -128,7 +199,7 @@ void M3x1::update() {
     };
 
     Color color = { 0, 0, 255, 255 };
-    slot.pos = pos;
+    slot.rect = { pos.x + 10, pos.y + 60, 164, 86 };
 
     if (slot.spinning) {
         button.y += 12;
@@ -149,6 +220,7 @@ void M3x1::update() {
 
     DrawRectangleRec(button, color);
     DrawText("SPIN", button.x + 6, button.y + 10, 20, WHITE);
+    slot.update();
 }
 
 void gain_money(Money amount, Vector2 pos) {
@@ -178,7 +250,7 @@ float Remap(float val, float old_min, float old_max, float new_min, float new_ma
 
 int main() {
 
-    SetConfigFlags(/*FLAG_VSYNC_HINT  | */FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_MAXIMIZED);
+    SetConfigFlags(/*FLAG_VSYNC_HINT  | */FLAG_WINDOW_RESIZABLE);
     InitWindow(screen_width, screen_height, game_title);
     //SetTargetFPS(60);
 
@@ -186,8 +258,20 @@ int main() {
     tex_background = LoadTexture("assets/background.png");
     tex_m3x1 = LoadTexture("assets/m3x1.png");
 
-    M3x1* m3x1 = new M3x1();
+    tex_tiles[0] = LoadTexture("assets/tile0.png");
+    tex_tiles[1] = LoadTexture("assets/tile1.png");
+    tex_tiles[2] = LoadTexture("assets/tile2.png");
+    tex_tiles[3] = LoadTexture("assets/tile3.png");
+    tex_tiles[4] = LoadTexture("assets/tile4.png");
+    tex_tiles[5] = LoadTexture("assets/tile5.png");
+
+    // --- Init gameplay ------------------------------------------
+    M3X1* m3x1 = new M3X1();
+    M3X1* m3x1_2 = new M3X1();
     machines[0] = m3x1;
+    machines[1] = m3x1_2;
+    display_money = money;
+
 
     while (!WindowShouldClose()) {
 
@@ -247,7 +331,8 @@ int main() {
             }
 
             char buf[64];
-            snprintf(buf, 64, "%ld", money);
+            display_money = Lerp(display_money, double(money), 10 * dt);
+            snprintf(buf, 64, "%ld", i64(roundf(display_money)));
             DrawText(buf, 714, 154, 40, WHITE);
         }
 
