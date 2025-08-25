@@ -43,6 +43,12 @@ Camera2D camera;
 Vector2 mouse;
 double game_time = 0;
 double dt = 0;
+double run_start_time = 0;
+
+enum class GameScreen {
+    Machines,
+    Shop,
+};
 
 struct Machine {
     Vector2 pos;
@@ -54,7 +60,7 @@ struct Machine {
     double shake_time = 0;
 
     virtual void update() = 0;
-    virtual void calculate_ev() = 0;
+    virtual void draw() = 0;
 
     void shake();
 };
@@ -83,8 +89,8 @@ struct SlotBuffer {
         buffer.reels = reels;
         buffer.rows = rows;
 
-        for (i32 reel = 0; reel < reels; reel++)
-            for (i32 row = 0; row < reels; row++)
+        for (int reel = 0; reel < reels; reel++)
+            for (int row = 0; row < reels; row++)
                 buffer.buffer[reel][row] = weights.generate();
 
         return buffer;
@@ -95,14 +101,16 @@ struct SlotBuffer {
     }
 
     void advance(int reel, int new_tile) {
-        for (i32 row = rows - 1; row >= 1; row--)
+        for (int row = rows - 1; row >= 1; row--)
             buffer[reel][row] = buffer[reel][row-1];
          buffer[reel][0] = new_tile;
     }
 };
 
+struct SlotMachine;
+
 struct Slot {
-    Machine*          machine          = nullptr;
+    SlotMachine*      machine          = nullptr;
     Rectangle         rect             = {};
     bool              spinning         = false;
     float             spin_time        = 0;
@@ -117,36 +125,48 @@ struct Slot {
     float             row_height       = 40;
     int               current_spin_distance = 0;
 
-    Money (*win_algo)(Slot* slot) = 0;
-    void (*stop_callback)(Slot* slot, int reel) = 0;
-
     float offsets[MAX_SLOT_REELS]       = {};
-    i32   upper_buffer[MAX_SLOT_REELS]  = {};
-    i32   spin_iter[MAX_SLOT_REELS]     = {};
+    int   upper_buffer[MAX_SLOT_REELS]  = {};
+    int   spin_iter[MAX_SLOT_REELS]     = {};
+
+    // CALLBACKS:
+    void (*on_reel_stop)(Slot* slot, int reel) = nullptr;
+    void (*on_stop)(Slot* slot) = nullptr;
 
     Rectangle get_reel_rect(int reel);
     void spin(Vector2 pos);
+
     void update();
+    void draw();
+
+    virtual ~Slot() {}
 };
 
-struct M3X1 : Machine {
+struct SlotMachine : Machine {
     Slot slot = {};
-    bool anticipation = false;
-    double payouts[TILE_COUNT] = { 0, 7, 20, 40 };
 
-    M3X1();
     virtual void update();
     virtual void calculate_ev();
+    virtual Money calculate_win() = 0;
+    virtual void on_reel_stop(int reel) {}
+    virtual void on_stop();
+
+    virtual void draw();
+    virtual void draw_background();
+    virtual void draw_button();
+    virtual void draw_slot();
+
+    SlotMachine();
+    virtual ~SlotMachine() {}
 };
 
-struct M1X1 : Machine {
-    Slot slot = {};
-    double payouts[TILE_COUNT] = { 0, 0, 1.5, 2.5, 6 };
 
-    M1X1();
-    virtual void update();
-    virtual void calculate_ev();
-};
+Texture tex_background;
+Texture tex_m3x1;
+Texture tex_m1x1;
+Texture tex_tiles[TILE_COUNT];
+
+// --- Renderer State -----------------------------------------
 
 struct TextOnScreen {
     std::string text     = 0;
@@ -159,13 +179,6 @@ struct TextOnScreen {
     float       gravity  = 1000;
 };
 
-Texture tex_background;
-Texture tex_m3x1;
-Texture tex_m1x1;
-Texture tex_tiles[TILE_COUNT];
-
-// --- Renderer State -----------------------------------------
-
 struct ButtonState {
     Rectangle   rect         = {};
     const char* text         = nullptr;
@@ -177,7 +190,9 @@ struct ButtonState {
 
 std::vector<TextOnScreen> texts;
 
-// --- Gameplay State -----------------------------------------
+// --- Game state ---------------------------------------------
+
+GameScreen screen = GameScreen::Machines;
 
 const Money spot_prices[9] = {
     50,     500,    1000,
@@ -196,7 +211,28 @@ bool button(ButtonState state);
 float Lerp(float a, float b, float t);
 float Remap(float val, float old_min, float old_max, float new_min, float new_max);
 
-// --- Gameplay Methods ---------------------------------------
+// --- Utils --------------------------------------------------
+
+float decimal_part(float f) {
+    return f - floorf(f);
+}
+
+float Lerp(float a, float b, float t) {
+    return a + (b - a) * t;
+}
+
+float Remap(float val, float old_min, float old_max, float new_min, float new_max) {
+    float t = (val - old_min) / (old_max-old_min);
+    return lerp(new_min, new_max, t);
+}
+
+float color_clamp(float x) {
+    if (x < 0) return 0;
+    if (x > 255) return 255;
+    return x;
+}
+
+// --- Machine methods ----------------------------------------
 
 void Machine::shake() {
     if (game_time - shake_time > 0.02) {
@@ -208,10 +244,11 @@ void Machine::shake() {
     pos.y += shake_y;
 }
 
+// --- Slot methods -------------------------------------------
 
 void Slot::spin(Vector2 pos) {
     if (!spinning) {
-        for (i32 reel = 0; reel < reels; reel++) {
+        for (int reel = 0; reel < reels; reel++) {
             upper_buffer[reel] = weights.generate();
             spin_iter[reel] = 0;
         }
@@ -240,7 +277,7 @@ void Slot::update() {
         spin_time += dt;
 
         bool done = true;
-        for (i32 reel = 0; reel < reels; reel++) {
+        for (int reel = 0; reel < reels; reel++) {
             if (spin_time < reel_offset_time * reel) continue;
             if (spin_iter[reel] >= current_spin_distance)
                 continue;
@@ -254,18 +291,20 @@ void Slot::update() {
                 offsets[reel] -= row_height;
 
                 spin_iter[reel]++;
-                if (spin_iter[reel] == current_spin_distance && this->stop_callback) {
+                if (spin_iter[reel] == current_spin_distance) {
                     spin_iter[reel] = 99999999; // set to high value in case current_spin_distance changes
-                    this->stop_callback(this, reel); 
+                    if (this->on_reel_stop) this->on_reel_stop(this, reel); 
                 }
             }
         }
         if (done) {
             spinning = false;
-            gain_money(win_algo(this), { rect.x, rect.y });
+            if (this->on_stop) this->on_stop(this);
         }
     }
+}
 
+void Slot::draw() {
     float avail_space_x = rect.width - reels * 40;
     float avail_space_y = rect.height - rows * 40;
     float gap_x = avail_space_x / (reels + 1);
@@ -276,9 +315,9 @@ void Slot::update() {
     Vector2 scissor_pos = GetWorldToScreen2D({rect.x, rect.y}, camera);
     BeginScissorMode(scissor_pos.x, scissor_pos.y, rect.width * camera.zoom, rect.height * camera.zoom);
 
-    for (i32 reel = 0; reel < reels; reel++) {
-        for (i32 row = -1; row < rows; row++) {
-            i32 tile = row >= 0 ? buffer.buffer[reel][row] : upper_buffer[reel];
+    for (int reel = 0; reel < reels; reel++) {
+        for (int row = -1; row < rows; row++) {
+            int tile = row >= 0 ? buffer.buffer[reel][row] : upper_buffer[reel];
 
             Vector2 pos = {
                 .x = this->rect.x + gap_x * (reel + 1) + reel * 40,
@@ -292,175 +331,174 @@ void Slot::update() {
     EndScissorMode();
 }
 
-M3X1::M3X1() {
+// --- SlotMachine methods ------------------------------------
+
+SlotMachine::SlotMachine() {
     slot.machine = this;
-    slot.stake   = 10;
-    slot.reels   = 3;
-    slot.rows    = 1;
 
-    slot.weights.add(1, 5);
-    slot.weights.add(2, 3);
-    slot.weights.add(3, 2);
-    slot.buffer  = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+    slot.on_reel_stop = [](Slot* slot, int reel) {
+        slot->machine->on_reel_stop(reel);
+    };
 
-    slot.win_algo = [](Slot* slot) -> Money {
-        M3X1* m3x1 = (M3X1*)slot->machine;
+    slot.on_stop = [](Slot* slot) {
+        slot->machine->on_stop();
+    };
+}
 
+void SlotMachine::on_stop() {
+    Money win = calculate_win();
+    gain_money(win, { slot.rect.x, slot.rect.y });
+}
+
+void SlotMachine::update() {
+    slot.update();
+}
+
+void SlotMachine::draw_background() {
+    DrawTexture(tex_m3x1, pos.x, pos.y - 9, WHITE);
+}
+
+void SlotMachine::draw_button() {
+    Color color = { 0, 0, 255, 255 };
+
+    Rectangle button = {
+        .x = pos.x + float(MACHINE_WIDTH - BUTTON_WIDTH) / 2,
+        .y = pos.y + float(MACHINE_HEIGHT - BUTTON_HEIGHT) - 8,
+        .width = float(BUTTON_WIDTH),
+        .height = float(BUTTON_HEIGHT),
+    };
+
+    if (slot.spinning) {
+        button.y += 12;
+        button.height -= 12;
+        color = { 0, 0, 160, 80 };
+    }
+    else {
+        if (CheckCollisionPointRec(mouse, button)) {
+            color = Color { 32, 80, 255, 255 };
+
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                slot.spin({button.x, button.y});
+            }
+        }
+    }
+
+    DrawRectangleRec(button, color);
+    DrawText("SPIN", button.x + 6, button.y + 10, 20, WHITE);
+}
+
+void SlotMachine::draw() {
+    if (slot.spinning) shake();
+
+    draw_background();
+    draw_slot();
+    draw_button();
+}
+
+void SlotMachine::draw_slot() {
+    slot.rect = { pos.x + 10, pos.y + 60, 164, 86 };
+    slot.draw();
+}
+
+void SlotMachine::calculate_ev() {
+    SlotBuffer buffer;
+    Money total = 0;
+    int spins = 100000;
+    int no_wins = 0;
+    for (int i = 0; i < spins; i++) {
+        slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+        Money win = calculate_win();
+        if (!win) no_wins++;
+        total += win;
+    }
+    this->ev = double(total) / spins;
+    this->win_percent = double(spins - no_wins) / double(spins);
+}
+
+// -- M3X1 ----------------------------------------------------
+
+struct M3X1 : SlotMachine {
+    bool anticipation = false;
+    std::vector<float> payouts = {};
+
+    M3X1() {
+        slot.stake   = 10;
+        slot.reels   = 3;
+        slot.rows    = 1;
+        payouts      = { 0, 7, 20, 40 };
+        slot.weights.add(1, 5);
+        slot.weights.add(2, 3);
+        slot.weights.add(3, 2);
+
+        calculate_ev();
+        printf("Spawned M3X1 (RTP: %.2f%%, Win Chance: %.2f%%)\n", ev*100, win_percent*100);
+
+        slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+    }
+
+    virtual Money calculate_win() override {
         Money win = 0;
-        if (slot->buffer.at(0,0) == slot->buffer.at(1,0) && slot->buffer.at(1,0) == slot->buffer.at(2,0)) {
-            return m3x1->payouts[slot->buffer.at(0,0)] * slot->stake;
+        if (slot.buffer.at(0,0) == slot.buffer.at(1,0) && slot.buffer.at(1,0) == slot.buffer.at(2,0)) {
+            return payouts[slot.buffer.at(0,0)] * slot.stake;
         }
         else {
             return 0;
         }
-    };
-    slot.stop_callback = [](Slot* slot, int reel) {
-        M3X1* m3x1 = (M3X1*)slot->machine;
+    }
 
-        if (reel == 1 && slot->buffer.at(0,0) == slot->buffer.at(1,0)) {
-            slot->current_spin_distance += 10;
-            m3x1->anticipation = true;
+    virtual void on_reel_stop(int reel) override {
+        if (reel == 1 && slot.buffer.at(0,0) == slot.buffer.at(1,0)) {
+            slot.current_spin_distance += 10;
+            anticipation = true;
         }
+    }
 
-        if (reel == slot->reels - 1) {
-            m3x1->anticipation = false;
+    virtual void on_stop() override {
+        SlotMachine::on_stop();
+        anticipation = false;
+    }
+
+    virtual void draw_slot() override {
+        if (anticipation) {
+            double t = game_time * 10;
+            Color color = decimal_part(t) < 0.5 ? Color{54, 16, 112,255} : Color{117, 21, 143,255};
+            DrawRectangleRec(slot.get_reel_rect(2), color);
         }
-    };
+        SlotMachine::draw_slot();
+    }
+};
 
-    calculate_ev();
-    printf("Spawned machien with %.2f%% RTP and %.2f%% win change.\n", ev*100, win_percent*100);
-}
+// --- M1X1 ---------------------------------------------------
 
-M1X1::M1X1() {
-    slot.machine = this;
-    slot.stake   = 10;
-    slot.reels   = 1;
-    slot.rows    = 1;
-    slot.speed   = 400;
-    slot.spin_distance = 13;
+struct M1X1 : SlotMachine {
+    std::vector<float> payouts = {};
+    Slot slot = {};
 
-    slot.weights.add(1, 4);
-    slot.weights.add(2, 3);
-    slot.weights.add(3, 2);
-    slot.weights.add(4, 1);
-    slot.buffer  = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+    M1X1() {
+        slot.machine = this;
+        slot.stake   = 10;
+        slot.reels   = 1;
+        slot.rows    = 1;
+        slot.speed   = 400;
+        slot.spin_distance = 13;
+        payouts = { 0, 0, 1.5, 2.5, 6 };
 
-    slot.win_algo = [](Slot* slot) -> Money {
-        M1X1* m3x1 = (M1X1*)slot->machine;
-        return m3x1->payouts[slot->buffer.at(0,0)] * slot->stake;
-    };
-    calculate_ev();
-    printf("Spawned machien with %.2f%% RTP and %.2f%% win change.\n", ev*100, win_percent*100);
-}
+        slot.weights.add(1, 4);
+        slot.weights.add(2, 3);
+        slot.weights.add(3, 2);
+        slot.weights.add(4, 1);
 
-void M1X1::calculate_ev() {
-    SlotBuffer buffer;
-    Money total = 0;
-    int spins = 100000;
-    int no_wins = 0;
-    for (i32 i = 0; i < spins; i++) {
+        calculate_ev();
+        printf("Spawned M1X1 (RTP: %.2f%%, Win Chance: %.2f%%)\n", ev*100, win_percent*100);
+
         slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
-        Money win = slot.win_algo(&slot) / slot.stake;
-        if (!win) no_wins++;
-        total += win;
-    }
-    this->ev = double(total) / spins;
-    this->win_percent = double(spins - no_wins) / double(spins);
-}
-
-void M3X1::calculate_ev() {
-    SlotBuffer buffer;
-    Money total = 0;
-    int spins = 100000;
-    int no_wins = 0;
-    for (i32 i = 0; i < spins; i++) {
-        slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
-        Money win = slot.win_algo(&slot) / slot.stake;
-        if (!win) no_wins++;
-        total += win;
-    }
-    this->ev = double(total) / spins;
-    this->win_percent = double(spins - no_wins) / double(spins);
-}
-
-void M3X1::update() {
-    if (slot.spinning) shake();
-
-    Rectangle button = {
-        .x = pos.x + float(MACHINE_WIDTH - BUTTON_WIDTH) / 2,
-        .y = pos.y + float(MACHINE_HEIGHT - BUTTON_HEIGHT) - 8,
-        .width = float(BUTTON_WIDTH),
-        .height = float(BUTTON_HEIGHT),
-    };
-
-    Color color = { 0, 0, 255, 255 };
-    slot.rect = { pos.x + 10, pos.y + 60, 164, 86 };
-    //slot.rect = { pos.x + 10, pos.y + 60, 220, 130 };
-
-    if (slot.spinning) {
-        button.y += 12;
-        button.height -= 12;
-        color = { 0, 0, 160, 80 };
-
-        // DrawRectangleRec(rect, BLACK);
-    }
-    else {
-        if (CheckCollisionPointRec(mouse, button)) {
-            color = Color { 32, 80, 255, 255 };
-
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                slot.spin({button.x, button.y});
-            }
-        }
     }
 
-    DrawTexture(tex_m3x1, pos.x, pos.y - 9, WHITE);
-
-    DrawRectangleRec(button, color);
-    DrawText("SPIN", button.x + 6, button.y + 10, 20, WHITE);
-
-    if (anticipation) {
-        double t = game_time * 10;
-        Color color = (t - floor(t) < 0.5) ? Color{54, 16, 112,255} : Color{117, 21, 143,255};
-        DrawRectangleRec(slot.get_reel_rect(2), color);
+    virtual Money calculate_win() override {
+        return payouts[slot.buffer.at(0,0)] * slot.stake;
     }
-    slot.update();
-}
+};
 
-void M1X1::update() {
-    if (slot.spinning) shake();
-
-    Rectangle button = {
-        .x = pos.x + float(MACHINE_WIDTH - BUTTON_WIDTH) / 2,
-        .y = pos.y + float(MACHINE_HEIGHT - BUTTON_HEIGHT) - 8,
-        .width = float(BUTTON_WIDTH),
-        .height = float(BUTTON_HEIGHT),
-    };
-
-    Color color = { 0, 0, 255, 255 };
-    slot.rect = { pos.x + 10, pos.y + 60, 164, 86 };
-    //slot.rect = { pos.x + 10, pos.y + 60, 220, 130 };
-
-    if (slot.spinning) {
-        button.y += 12;
-        button.height -= 12;
-        color = { 0, 0, 160, 80 };
-    }
-    else {
-        if (CheckCollisionPointRec(mouse, button)) {
-            color = Color { 32, 80, 255, 255 };
-
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                slot.spin({button.x, button.y});
-            }
-        }
-    }
-
-    DrawTexture(tex_m1x1, pos.x, pos.y - 9, WHITE);
-    DrawRectangleRec(button, color);
-    DrawText("SPIN", button.x + 6, button.y + 10, 20, WHITE);
-    slot.update();
-}
 
 void gain_money(Money amount, Vector2 pos) {
     if (amount == 0) return;
@@ -480,21 +518,6 @@ void gain_money(Money amount, Vector2 pos) {
     texts.push_back(text);
 }
 
-float Lerp(float a, float b, float t) {
-    return a + (b - a) * t;
-}
-
-float Remap(float val, float old_min, float old_max, float new_min, float new_max) {
-    float t = (val - old_min) / (old_max-old_min);
-    return lerp(new_min, new_max, t);
-}
-
-float color_clamp(float x) {
-    if (x < 0) return 0;
-    if (x > 255) return 255;
-    return x;
-}
-
 bool button(ButtonState state) {
     bool hover = state.enabled && CheckCollisionPointRec(mouse, state.rect);
     if (hover) state.background.r = color_clamp(state.background.r * 1.5);
@@ -510,7 +533,7 @@ bool button(ButtonState state) {
     DrawRectangleRec(state.rect, state.background);
 
     int w = MeasureText(state.text, state.font_size);
-    DrawText(state.text, state.rect.x + state.rect.width / 2 - w/2, state.rect.y + state.rect.height/2 - state.font_size/2, state.font_size, state.text_color);
+    DrawText(state.text, state.rect.x + state.rect.width / 2 - w/2.0f, 2 + state.rect.y + state.rect.height/2 - state.font_size/2.0f, state.font_size, state.text_color);
 
     bool click = hover && state.enabled && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
     return click;
@@ -520,7 +543,7 @@ int main() {
 
     SetConfigFlags(/*FLAG_VSYNC_HINT  | */FLAG_WINDOW_RESIZABLE);
     InitWindow(screen_width, screen_height, game_title);
-    //SetTargetFPS(60);
+    SetTargetFPS(60);
 
     // --- Load Assets --------------------------------------------
     tex_background = LoadTexture("assets/background.png");
@@ -545,6 +568,7 @@ int main() {
 
     display_money = money;
 
+    run_start_time = GetTime();
 
     while (!WindowShouldClose()) {
 
@@ -582,66 +606,100 @@ int main() {
         game_time = GetTime();
         dt = GetFrameTime();
 
-        // Render Game
-        {
-            DrawTexture(tex_background, 0, 0, WHITE);
+        // --- Simulate machines --------------------------------------
+        for (int i = 0; i < 9; i++) {
+            if (machines[i]) machines[i]->update();
+        }
 
-            for (int i = 0; i < ARRAY_SIZE(machines); i++) {
-                Machine* machine = machines[i];
+        // --- Render game --------------------------------------------
+        DrawTexture(tex_background, 0, 0, WHITE);
 
-                int x = TOP_PADDING + (i % 3) * (MACHINE_WIDTH + MACHINE_GAP_X);
-                int y = RIGHT_PADDING + (i / 3) * (MACHINE_HEIGHT + MACHINE_GAP_Y);
+        switch (screen) {
+            case GameScreen::Machines: {
+
+                for (int i = 0; i < ARRAY_SIZE(machines); i++) {
+                    Machine* machine = machines[i];
+
+                    int x = TOP_PADDING + (i % 3) * (MACHINE_WIDTH + MACHINE_GAP_X);
+                    int y = RIGHT_PADDING + (i / 3) * (MACHINE_HEIGHT + MACHINE_GAP_Y);
 
 
-                if (machine) {
-                    machine->pos.x = x;
-                    machine->pos.y = y;
-                    machine->update();
-                }
-                else {
-                    DrawRectangle(x, y, MACHINE_WIDTH, MACHINE_HEIGHT, Color{0, 0, 0, 90});
-
-                    if (spot_unlocked[i]) {
-                        float _y = y + 5;
-                        DrawText("NO MACHINE", x + 10, _y, 20, WHITE);
-                        _y += 40;
-                        DrawText("Open the SHOP", x + 10, _y, 20, WHITE);
-                        _y += 20;
-                        DrawText("to buy one", x + 10, _y, 20, WHITE);
-                        _y += 20;
+                    if (machine) {
+                        machine->pos.x = x;
+                        machine->pos.y = y;
+                        machine->draw();
                     }
                     else {
-                        bool enabled = spot_prices[i] <= money;
-                        float _y = y + 5;
-                        DrawText("SPOT", x + 10, _y, 40, RED);
-                        _y += 40;
-                        DrawText("LOCKED", x + 10, _y, 40, RED);
-                        _y += 50;
+                        DrawRectangle(x, y, MACHINE_WIDTH, MACHINE_HEIGHT, Color{0, 0, 0, 90});
 
-                        char buf[64];
-                        snprintf(buf, _y, "Price: $%lld", spot_prices[i]);
-                        DrawText(buf, x + 10, y + 90, 20,  enabled ? GREEN : RED);
-                        _y += 30;
+                        if (spot_unlocked[i]) {
+                            float _y = y + 5;
+                            DrawText("NO MACHINE", x + 10, _y, 20, WHITE);
+                            _y += 40;
+                            DrawText("Open the SHOP", x + 10, _y, 20, WHITE);
+                            _y += 20;
+                            DrawText("to buy one", x + 10, _y, 20, WHITE);
+                            _y += 20;
+                        }
+                        else {
+                            bool enabled = spot_prices[i] <= money;
+                            float _y = y + 5;
+                            DrawText("SPOT", x + 10, _y, 40, RED);
+                            _y += 40;
+                            DrawText("LOCKED", x + 10, _y, 40, RED);
+                            _y += 50;
 
-                        if (button({
-                            .rect = Rectangle{float(x + 8), float(_y), MACHINE_WIDTH - 16, y + MACHINE_HEIGHT - _y - 8 },
-                            .text = "BUY",
-                            .enabled = enabled,
-                        })) {
-                            gain_money(-spot_prices[i], mouse);
-                            spot_unlocked[i] = true;
+                            char buf[64];
+                            snprintf(buf, _y, "Price: $%lld", spot_prices[i]);
+                            DrawText(buf, x + 10, y + 90, 20,  enabled ? GREEN : RED);
+                            _y += 30;
+
+                            if (button({
+                                .rect = Rectangle{float(x + 8), float(_y), MACHINE_WIDTH - 16, y + MACHINE_HEIGHT - _y - 8 },
+                                .text = "BUY",
+                                .enabled = enabled,
+                            })) {
+                                gain_money(-spot_prices[i], mouse);
+                                spot_unlocked[i] = true;
+                            }
                         }
                     }
                 }
-            }
 
-            char buf[64];
-            display_money = Lerp(display_money, double(money), 10 * dt);
-            snprintf(buf, 64, "%ld", i64(roundf(display_money)));
-            DrawText(buf, 714, 154, 40, WHITE);
+                break;
+            }
+            case GameScreen::Shop: {
+                break;
+            }
         }
 
-        for (i32 i = 0; i < texts.size(); i++) {
+        // --- Draw Money ------------------------------------------
+        char buf[64];
+        display_money = Lerp(display_money, double(money), 10 * dt);
+        snprintf(buf, 64, "%ld", i64(roundf(display_money)));
+        int _y = 154;
+        DrawText(buf, 714, _y, 40, WHITE);
+        _y += 50;
+
+        // --- Draw Time Spent Solvent -----------------------------
+        double time_solvent = game_time - run_start_time;
+        snprintf(buf, 64, "%d:%.2d", int(time_solvent / 60), int(floor(time_solvent)) % 60);
+        DrawText("Time spent Solvent", 700, _y, 20, WHITE);
+        DrawText(buf, 900, _y, 40, WHITE);
+        _y += 30;
+
+        // --- Draw Shop button -----------------------------
+        if (button({
+            .rect         = { 700, float(_y), 150, 45 },
+            .text         = "SHOP",
+            .background   = BLUE,
+            .text_color   = WHITE,
+            .font_size    = 40,
+        })) {
+            screen = screen == GameScreen::Shop ? GameScreen::Machines : GameScreen::Shop;
+        }
+
+        for (int i = 0; i < texts.size(); i++) {
             TextOnScreen& text = texts[i];
             float t = pow(text.t / text.duration, 2);
 
