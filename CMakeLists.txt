@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 4.0)
 project(slots)
 
 add_executable(slots
-    src/main.cpp)
+    9xgambler.cpp)
 
 
 set(raylib_USE_STATIC_LIBS ON CACHE BOOL "")
