@@ -164,6 +164,7 @@ struct Slot {
 
 struct SlotMachine : Machine {
     Slot slot = {};
+    Texture texture = {};
 
     virtual void update();
     virtual void calculate_ev();
@@ -180,11 +181,6 @@ struct SlotMachine : Machine {
     virtual ~SlotMachine() {}
 };
 
-Texture tex_background;
-Texture tex_m3x1;
-Texture tex_m1x1;
-Texture tex_tiles[TILE_COUNT];
-
 // --- Renderer State -----------------------------------------
 
 int                       screen_width    = 1024;
@@ -198,8 +194,16 @@ double                    run_start_time  = 0;
 std::vector<TextOnScreen> texts           = {};
 const char*               tooltip         = nullptr;
 
+// --- Textures -----------------------------------------------
+
+Texture tex_background;
+Texture tex_m3x1;
+Texture tex_m1x1;
+Texture tex_tiles[TILE_COUNT];
+
 
 // --- Game state ---------------------------------------------
+
 
 GameScreen  screen = GameScreen::Machines;
 Money       money  = 700;
@@ -364,7 +368,7 @@ void SlotMachine::update() {
 }
 
 void SlotMachine::draw_background() {
-    DrawTexture(tex_m3x1, pos.x, pos.y - 9, WHITE);
+    DrawTexture(texture, pos.x, pos.y - 9, WHITE);
 }
 
 void SlotMachine::draw_button() {
@@ -428,7 +432,6 @@ void SlotMachine::calculate_ev() {
 
 struct M1X1 : SlotMachine {
     std::vector<float> payouts = {};
-    Slot slot = {};
 
     M1X1() {
         slot.machine = this;
@@ -438,6 +441,7 @@ struct M1X1 : SlotMachine {
         slot.speed   = 400;
         slot.spin_distance = 13;
         payouts = { 0, 0, 1.5, 2.5, 6 };
+        texture = tex_m1x1;
 
         slot.weights.add(1, 4);
         slot.weights.add(2, 3);
@@ -466,6 +470,7 @@ struct M3X1 : SlotMachine {
         slot.reels   = 3;
         slot.rows    = 1;
         payouts      = { 0, 7, 20, 40 };
+        texture      = tex_m3x1;
         slot.weights.add(1, 5);
         slot.weights.add(2, 3);
         slot.weights.add(3, 2);
@@ -655,16 +660,16 @@ int main() {
     shop_entries.push_back(new ShopEntry_BuyNextSpot());
 
     shop_entries.push_back(new ShopEntry_Machine(
-        "M1X1",
+        "1X1",
         "Baby's first slot machine",
         500,
         []() -> Machine* { return new M1X1(); }
     ));
 
     shop_entries.push_back(new ShopEntry_Machine(
-        "M3X1",
+        "3X1",
         "A more civilized slot machine",
-        500,
+        800,
         []() -> Machine* { return new M3X1(); }
     ));
 
