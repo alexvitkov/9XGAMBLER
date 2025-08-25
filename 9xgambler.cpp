@@ -1,5 +1,6 @@
 #include "raylib.h"
 #include <stdint.h>
+#include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
@@ -12,6 +13,7 @@
 #define VIEWPORT_WIDTH 1024
 #define VIEWPORT_HEIGHT 768
 
+#define GAME_NAME "9XGAMBLER"
 #define MACHINE_WIDTH 185
 #define MACHINE_HEIGHT 232
 #define MACHINE_GAP_X 18
@@ -35,15 +37,25 @@ typedef int64_t  i64;
 
 typedef i64 Money;
 
-const char* game_title = "9X GAMBLER";
-int screen_width = 1024;
-int screen_height = 768;
-float screen_scale;
-Camera2D camera;
-Vector2 mouse;
-double game_time = 0;
-double dt = 0;
-double run_start_time = 0;
+struct TextOnScreen {
+    std::string text     = 0;
+    Vector2     pos      = {};
+    float       t        = 0;
+    float       duration = 4;
+    Color       color    = WHITE;
+    float       size     = 40;
+    Vector2     velocity = {0, -100};
+    float       gravity  = 1000;
+};
+
+struct ButtonState {
+    Rectangle   rect         = {};
+    const char* text         = nullptr;
+    Color       background   = BLUE;
+    Color       text_color   = WHITE;
+    int         font_size    = 20;
+    bool        enabled      = true;  
+};
 
 enum class GameScreen {
     Machines,
@@ -63,6 +75,14 @@ struct Machine {
     virtual void draw() = 0;
 
     void shake();
+};
+
+struct ShopEntry {
+    const char* name;
+    virtual Money cost() { return 0; }
+    virtual const char* lock_reason() { return nullptr; }
+    virtual void buy() { }
+    virtual bool should_remove() { return false; }
 };
 
 template <typename T>
@@ -160,7 +180,6 @@ struct SlotMachine : Machine {
     virtual ~SlotMachine() {}
 };
 
-
 Texture tex_background;
 Texture tex_m3x1;
 Texture tex_m1x1;
@@ -168,48 +187,38 @@ Texture tex_tiles[TILE_COUNT];
 
 // --- Renderer State -----------------------------------------
 
-struct TextOnScreen {
-    std::string text     = 0;
-    Vector2     pos      = {};
-    float       t        = 0;
-    float       duration = 4;
-    Color       color    = WHITE;
-    float       size     = 40;
-    Vector2     velocity = {0, -100};
-    float       gravity  = 1000;
-};
+int                       screen_width    = 1024;
+int                       screen_height   = 768;
+float                     screen_scale    = 1;
+Camera2D                  camera          = {};
+Vector2                   mouse           = {};
+double                    game_time       = 0;
+double                    dt              = 0;
+double                    run_start_time  = 0;
+std::vector<TextOnScreen> texts           = {};
+const char*               tooltip         = nullptr;
 
-struct ButtonState {
-    Rectangle   rect         = {};
-    const char* text         = nullptr;
-    Color       background   = BLUE;
-    Color       text_color   = WHITE;
-    int         font_size    = 20;
-    bool        enabled      = true;  
-};
-
-std::vector<TextOnScreen> texts;
 
 // --- Game state ---------------------------------------------
 
-GameScreen screen = GameScreen::Machines;
+GameScreen  screen = GameScreen::Machines;
+Money       money  = 700;
 
 const Money spot_prices[9] = {
-    50,     500,    1000,
+    50,     1000,   2000,
     5000,   25000,  100000,
     20000,  500000, 1000000,
 };
 
 bool spot_unlocked[9] = {};
-
 Machine* machines[9] = {};
-Money money = 200;
 double display_money = 0;
+
+std::vector<ShopEntry*> shop_entries;
+int shop_page = 0;
 
 void gain_money(Money money, Vector2 pos);
 bool button(ButtonState state);
-float Lerp(float a, float b, float t);
-float Remap(float val, float old_min, float old_max, float new_min, float new_max);
 
 // --- Utils --------------------------------------------------
 
@@ -415,6 +424,37 @@ void SlotMachine::calculate_ev() {
     this->win_percent = double(spins - no_wins) / double(spins);
 }
 
+// --- M1X1 ---------------------------------------------------
+
+struct M1X1 : SlotMachine {
+    std::vector<float> payouts = {};
+    Slot slot = {};
+
+    M1X1() {
+        slot.machine = this;
+        slot.stake   = 10;
+        slot.reels   = 1;
+        slot.rows    = 1;
+        slot.speed   = 400;
+        slot.spin_distance = 13;
+        payouts = { 0, 0, 1.5, 2.5, 6 };
+
+        slot.weights.add(1, 4);
+        slot.weights.add(2, 3);
+        slot.weights.add(3, 2);
+        slot.weights.add(4, 1);
+
+        calculate_ev();
+        printf("Spawned M1X1 (RTP: %.2f%%, Win Chance: %.2f%%)\n", ev*100, win_percent*100);
+
+        slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+    }
+
+    virtual Money calculate_win() override {
+        return payouts[slot.buffer.at(0,0)] * slot.stake;
+    }
+};
+
 // -- M3X1 ----------------------------------------------------
 
 struct M3X1 : SlotMachine {
@@ -468,37 +508,7 @@ struct M3X1 : SlotMachine {
     }
 };
 
-// --- M1X1 ---------------------------------------------------
-
-struct M1X1 : SlotMachine {
-    std::vector<float> payouts = {};
-    Slot slot = {};
-
-    M1X1() {
-        slot.machine = this;
-        slot.stake   = 10;
-        slot.reels   = 1;
-        slot.rows    = 1;
-        slot.speed   = 400;
-        slot.spin_distance = 13;
-        payouts = { 0, 0, 1.5, 2.5, 6 };
-
-        slot.weights.add(1, 4);
-        slot.weights.add(2, 3);
-        slot.weights.add(3, 2);
-        slot.weights.add(4, 1);
-
-        calculate_ev();
-        printf("Spawned M1X1 (RTP: %.2f%%, Win Chance: %.2f%%)\n", ev*100, win_percent*100);
-
-        slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
-    }
-
-    virtual Money calculate_win() override {
-        return payouts[slot.buffer.at(0,0)] * slot.stake;
-    }
-};
-
+// --- Gameplay functions -------------------------------------
 
 void gain_money(Money amount, Vector2 pos) {
     if (amount == 0) return;
@@ -539,13 +549,96 @@ bool button(ButtonState state) {
     return click;
 }
 
-int main() {
+void go_to_screen(GameScreen _screen) {
+    if (screen == _screen) return;
 
-    SetConfigFlags(/*FLAG_VSYNC_HINT  | */FLAG_WINDOW_RESIZABLE);
-    InitWindow(screen_width, screen_height, game_title);
+    screen = _screen;
+
+    switch (screen) {
+        case GameScreen::Shop: {
+            shop_page = 0;
+            break;
+        }
+        default: break;
+    }
+}
+
+void buy_spot(int i) {
+    assert(!spot_unlocked[i]);
+    if (!spot_unlocked[i]) {
+        gain_money(-spot_prices[i], mouse);
+        spot_unlocked[i] = true;
+    }
+}
+
+
+struct ShopEntry_BuyNextSpot : ShopEntry {
+    ShopEntry_BuyNextSpot() {
+        this->name = "Buy next Machine Spot";
+    }
+
+    virtual bool should_remove() override {
+        return next_spot_to_buy() == -1;
+    }
+
+    virtual Money cost() override {
+        return spot_prices[next_spot_to_buy()];
+    }
+
+    virtual void buy() override {
+        buy_spot(next_spot_to_buy());
+    }
+
+    int next_spot_to_buy() {
+        for (int i = 0; i < 9; i++)
+            if (!spot_unlocked[i])
+                return i;
+        return -1;
+    }
+};
+
+struct ShopEntry_Machine : ShopEntry {
+    std::string text;
+    Money _cost;
+    Machine* (*construct)();
+
+    ShopEntry_Machine(const char* name, const char* tagline, Money cost, Machine* (*construct)()) {
+        this->text = std::format("Buy {}", name);
+        this->name = this->text.c_str();
+        this->_cost = cost;
+        this->construct = construct;
+    }
+
+    virtual Money cost() override {
+        return this->_cost;
+    }
+
+    virtual const char* lock_reason() override {
+        for (int i = 0; i < 9; i++)
+            if (spot_unlocked[i] && !machines[i])
+                return nullptr;
+        return "No empty spots";
+    }
+
+    virtual void buy() override {
+        gain_money(-_cost, mouse);
+        Machine* machine = this->construct();
+
+        for (int i = 0; i < 9; i++)
+            if (spot_unlocked[i] && !machines[i])
+                machines[i] = machine;
+    }
+};
+
+// --- Send it ------------------------------------------------
+
+int main() {
+    SetConfigFlags(/*FLAG_VSYNC_HINT  | */ FLAG_WINDOW_RESIZABLE);
+    InitWindow(screen_width, screen_height, GAME_NAME);
     SetTargetFPS(60);
 
     // --- Load Assets --------------------------------------------
+
     tex_background = LoadTexture("assets/background.png");
     tex_m1x1 = LoadTexture("assets/m1x1.png");
     tex_m3x1 = LoadTexture("assets/m3x1.png");
@@ -559,12 +652,26 @@ int main() {
 
     // --- Init gameplay ------------------------------------------
 
-    /*
-    M1X1* m1x1 = new M1X1();
-    machines[0] = m1x1;
-    M3X1* m3x1 = new M3X1();
-    machines[1] = m3x1;
-    */
+    shop_entries.push_back(new ShopEntry_BuyNextSpot());
+
+    shop_entries.push_back(new ShopEntry_Machine(
+        "M1X1",
+        "Baby's first slot machine",
+        500,
+        []() -> Machine* { return new M1X1(); }
+    ));
+
+    shop_entries.push_back(new ShopEntry_Machine(
+        "M3X1",
+        "A more civilized slot machine",
+        500,
+        []() -> Machine* { return new M3X1(); }
+    ));
+
+    // M1X1* m1x1 = new M1X1();
+    // machines[0] = m1x1;
+    // M3X1* m3x1 = new M3X1();
+    // machines[1] = m3x1;
 
     display_money = money;
 
@@ -607,16 +714,17 @@ int main() {
         dt = GetFrameTime();
 
         // --- Simulate machines --------------------------------------
+
         for (int i = 0; i < 9; i++) {
             if (machines[i]) machines[i]->update();
         }
 
         // --- Render game --------------------------------------------
+
         DrawTexture(tex_background, 0, 0, WHITE);
 
         switch (screen) {
             case GameScreen::Machines: {
-
                 for (int i = 0; i < ARRAY_SIZE(machines); i++) {
                     Machine* machine = machines[i];
 
@@ -659,8 +767,7 @@ int main() {
                                 .text = "BUY",
                                 .enabled = enabled,
                             })) {
-                                gain_money(-spot_prices[i], mouse);
-                                spot_unlocked[i] = true;
+                                buy_spot(i);
                             }
                         }
                     }
@@ -669,7 +776,71 @@ int main() {
                 break;
             }
             case GameScreen::Shop: {
-                break;
+                float y = 8;
+                float x_start = 8;
+                float x_end = 620;
+
+                DrawText("SHOP", y, 12, 40, WHITE);
+                if (button({
+                    .rect         = { 540, y, 80, 40 },
+                    .text         = "Close",
+                    .background   = RED,
+                })) {
+                    go_to_screen(GameScreen::Machines);
+                }
+
+                y = 55;
+                DrawLineEx({x_start, y}, {x_end, y}, 4, WHITE);
+                y += 20;
+
+                int start = shop_page * 8;
+                int end = 8;
+                if (start < 0) start = 0;
+                if (end > shop_entries.size()) end = shop_entries.size();
+
+
+                for (int i = start; i < end; i++) {
+                    ShopEntry* entry = shop_entries[i];
+                    if (entry->should_remove()) {
+                        delete entry;
+                        shop_entries.erase(shop_entries.begin() + i);
+                        i--;
+                    }
+                    else {
+                        Money cost = entry->cost();
+                        bool can_afford = money >= cost;
+                        const char* lock_reason = entry->lock_reason();
+
+                        DrawRectangle(x_start, y, x_end - x_start, 60, BLACK);
+                        DrawText(entry->name, x_start + 4, y + 4, 20, WHITE);
+
+                        char buf[64] = {};
+                        snprintf(buf, 64, "$%lld", cost);
+
+                        int len = MeasureText(buf, 40);
+                        DrawText(buf, x_end - 130 - 8 - len, y + 10, 40, can_afford ? WHITE : RED);
+
+                        Rectangle button_rect = { x_end - 130, y + 6, 122, 47 };
+                        if (button({
+                            .rect         = button_rect,
+                            .text         = "BUY",
+                            .font_size    = 40,
+                            .enabled      = can_afford && !entry->lock_reason(),
+                        })) {
+                            entry->buy();
+                        }
+
+                        if (CheckCollisionPointRec(mouse, button_rect)) {
+                            if (lock_reason)
+                                tooltip = lock_reason;
+                            else if (!can_afford)
+                                tooltip = "Can't afford.";
+                        }
+
+                        y += 70;
+                    }
+                }
+
             }
         }
 
@@ -696,7 +867,7 @@ int main() {
             .text_color   = WHITE,
             .font_size    = 40,
         })) {
-            screen = screen == GameScreen::Shop ? GameScreen::Machines : GameScreen::Shop;
+            go_to_screen(screen == GameScreen::Shop ? GameScreen::Machines : GameScreen::Shop);
         }
 
         for (int i = 0; i < texts.size(); i++) {
@@ -724,14 +895,26 @@ int main() {
             }
         }
 
-        EndMode2D();
+        if (tooltip) {
+            int len = MeasureText(tooltip, 20);
+            Vector2 pos = mouse;
+            pos.y += 30;
+            if (pos.x + len > screen_width) pos.x = screen_width - len;
+            if (pos.x < 0) pos.x = 0;
+            if (pos.y + 20 > screen_height) pos.y = screen_height - 20;
+            DrawRectangle(pos.x - 4, pos.y - 4, len + 8, 28, BLACK);
+            DrawText(tooltip, pos.x, pos.y, 20, WHITE);
+        }
+        tooltip = nullptr;
 
+        EndMode2D();
 
         if (0) { // FPS Counter
             char buf[64];
             snprintf(buf, 64, "FPS: %d", GetFPS());
             DrawText(buf, 8, 8, 20, WHITE);
         }
+
         EndDrawing();
     }
 
