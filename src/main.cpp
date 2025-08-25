@@ -141,7 +141,7 @@ struct M3X1 : Machine {
 
 struct M1X1 : Machine {
     Slot slot = {};
-    double payouts[TILE_COUNT] = { 0, 0, 2, 3, 8 };
+    double payouts[TILE_COUNT] = { 0, 0, 1.5, 2.5, 6 };
 
     M1X1();
     virtual void update();
@@ -166,15 +166,33 @@ Texture tex_tiles[TILE_COUNT];
 
 // --- Renderer State -----------------------------------------
 
+struct ButtonState {
+    Rectangle   rect         = {};
+    const char* text         = nullptr;
+    Color       background   = BLUE;
+    Color       text_color   = WHITE;
+    int         font_size    = 20;
+    bool        enabled      = true;  
+};
+
 std::vector<TextOnScreen> texts;
 
 // --- Gameplay State -----------------------------------------
 
+const Money spot_prices[9] = {
+    50,     500,    1000,
+    5000,   25000,  100000,
+    20000,  500000, 1000000,
+};
+
+bool spot_unlocked[9] = {};
+
 Machine* machines[9] = {};
-Money money = 500;
+Money money = 200;
 double display_money = 0;
 
 void gain_money(Money money, Vector2 pos);
+bool button(ButtonState state);
 float Lerp(float a, float b, float t);
 float Remap(float val, float old_min, float old_max, float new_min, float new_max);
 
@@ -318,10 +336,10 @@ M1X1::M1X1() {
     slot.stake   = 10;
     slot.reels   = 1;
     slot.rows    = 1;
-    slot.speed   = 500;
-    slot.spin_distance = 15;
+    slot.speed   = 400;
+    slot.spin_distance = 13;
 
-    slot.weights.add(1, 6);
+    slot.weights.add(1, 4);
     slot.weights.add(2, 3);
     slot.weights.add(3, 2);
     slot.weights.add(4, 1);
@@ -471,6 +489,33 @@ float Remap(float val, float old_min, float old_max, float new_min, float new_ma
     return lerp(new_min, new_max, t);
 }
 
+float color_clamp(float x) {
+    if (x < 0) return 0;
+    if (x > 255) return 255;
+    return x;
+}
+
+bool button(ButtonState state) {
+    bool hover = state.enabled && CheckCollisionPointRec(mouse, state.rect);
+    if (hover) state.background.r = color_clamp(state.background.r * 1.5);
+    if (hover) state.background.g = color_clamp(state.background.g * 1.5);
+    if (hover) state.background.b = color_clamp(state.background.b * 1.5);
+
+    if (!state.enabled) {
+        state.background = GRAY;
+        state.background.a = 128;
+        state.text_color.a = 128;
+    }
+
+    DrawRectangleRec(state.rect, state.background);
+
+    int w = MeasureText(state.text, state.font_size);
+    DrawText(state.text, state.rect.x + state.rect.width / 2 - w/2, state.rect.y + state.rect.height/2 - state.font_size/2, state.font_size, state.text_color);
+
+    bool click = hover && state.enabled && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    return click;
+}
+
 int main() {
 
     SetConfigFlags(/*FLAG_VSYNC_HINT  | */FLAG_WINDOW_RESIZABLE);
@@ -491,10 +536,12 @@ int main() {
 
     // --- Init gameplay ------------------------------------------
 
+    /*
     M1X1* m1x1 = new M1X1();
     machines[0] = m1x1;
     M3X1* m3x1 = new M3X1();
     machines[1] = m3x1;
+    */
 
     display_money = money;
 
@@ -553,6 +600,38 @@ int main() {
                 }
                 else {
                     DrawRectangle(x, y, MACHINE_WIDTH, MACHINE_HEIGHT, Color{0, 0, 0, 90});
+
+                    if (spot_unlocked[i]) {
+                        float _y = y + 5;
+                        DrawText("NO MACHINE", x + 10, _y, 20, WHITE);
+                        _y += 40;
+                        DrawText("Open the SHOP", x + 10, _y, 20, WHITE);
+                        _y += 20;
+                        DrawText("to buy one", x + 10, _y, 20, WHITE);
+                        _y += 20;
+                    }
+                    else {
+                        bool enabled = spot_prices[i] <= money;
+                        float _y = y + 5;
+                        DrawText("SPOT", x + 10, _y, 40, RED);
+                        _y += 40;
+                        DrawText("LOCKED", x + 10, _y, 40, RED);
+                        _y += 50;
+
+                        char buf[64];
+                        snprintf(buf, _y, "Price: $%lld", spot_prices[i]);
+                        DrawText(buf, x + 10, y + 90, 20,  enabled ? GREEN : RED);
+                        _y += 30;
+
+                        if (button({
+                            .rect = Rectangle{float(x + 8), float(_y), MACHINE_WIDTH - 16, y + MACHINE_HEIGHT - _y - 8 },
+                            .text = "BUY",
+                            .enabled = enabled,
+                        })) {
+                            gain_money(-spot_prices[i], mouse);
+                            spot_unlocked[i] = true;
+                        }
+                    }
                 }
             }
 
@@ -590,7 +669,7 @@ int main() {
         EndMode2D();
 
 
-        if (1) { // FPS Counter
+        if (0) { // FPS Counter
             char buf[64];
             snprintf(buf, 64, "FPS: %d", GetFPS());
             DrawText(buf, 8, 8, 20, WHITE);
