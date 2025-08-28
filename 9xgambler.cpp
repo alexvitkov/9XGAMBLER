@@ -99,6 +99,11 @@ struct Weights {
     }
 };
 
+struct SlotTile {
+    int     id;
+    Texture texture;
+};
+
 struct SlotBuffer {
     int reels = 0;
     int rows = 0;
@@ -134,13 +139,15 @@ struct Slot {
     Rectangle         rect             = {};
     bool              spinning         = false;
     float             spin_time        = 0;
-    float             reel_offset_time = 0.3;
+    float             reel_offset_time = 0.1;
     int               spin_distance    = 10;
+    int               spin_distance_per_reel = 3;
     Money             stake            = 1;
     SlotBuffer        buffer           = {};
     int               reels            = {};
     int               rows             = {};
     Weights<int>      weights          = {};
+    std::vector<SlotTile> tiles        = {};
     float             speed            = 300;
     float             row_height       = 40;
     int               current_spin_distance = 0;
@@ -148,6 +155,7 @@ struct Slot {
     float offsets[MAX_SLOT_REELS]       = {};
     int   upper_buffer[MAX_SLOT_REELS]  = {};
     int   spin_iter[MAX_SLOT_REELS]     = {};
+    bool stopped[MAX_SLOT_REELS]        = {};
 
     // CALLBACKS:
     void (*on_reel_stop)(Slot* slot, int reel) = nullptr;
@@ -199,17 +207,29 @@ const char*               tooltip         = nullptr;
 Texture tex_background;
 Texture tex_m3x1;
 Texture tex_m1x1;
-Texture tex_tiles[TILE_COUNT];
+
+Texture tex_tile_0;
+Texture tex_tile_dot;
+Texture tex_tile_orange;
+Texture tex_tile_cherry;
+Texture tex_tile_7;
+Texture tex_tile_777;
+
+Texture tex_tile_9;
+Texture tex_tile_10;
+Texture tex_tile_j;
+Texture tex_tile_q;
+Texture tex_tile_k;
 
 
 // --- Game state ---------------------------------------------
 
 
 GameScreen  screen = GameScreen::Machines;
-Money       money  = 700;
+Money       money  = 1500;
 
 const Money spot_prices[9] = {
-    50,     1000,   2000,
+    100,    200,    2000,
     5000,   25000,  100000,
     20000,  500000, 1000000,
 };
@@ -264,6 +284,7 @@ void Slot::spin(Vector2 pos) {
         for (int reel = 0; reel < reels; reel++) {
             upper_buffer[reel] = weights.generate();
             spin_iter[reel] = 0;
+            stopped[reel] = false;
         }
 
         current_spin_distance = spin_distance;
@@ -292,24 +313,36 @@ void Slot::update() {
         bool done = true;
         for (int reel = 0; reel < reels; reel++) {
             if (spin_time < reel_offset_time * reel) continue;
-            if (spin_iter[reel] >= current_spin_distance)
+
+            if (stopped[reel]) {
                 continue;
+            }
 
-            done = false;
-            offsets[reel] += speed * dt;
-
-            while (offsets[reel] > row_height) {
-                buffer.advance(reel, upper_buffer[reel]);
-                upper_buffer[reel] = weights.generate();
-                offsets[reel] -= row_height;
-
-                spin_iter[reel]++;
-                if (spin_iter[reel] == current_spin_distance) {
+            int required_distance = current_spin_distance + spin_distance_per_reel * reel;
+            if (spin_iter[reel] >= required_distance) {
+                if (!stopped[reel]) {
+                    stopped[reel] = true;
                     spin_iter[reel] = 99999999; // set to high value in case current_spin_distance changes
+                    offsets[reel] = 0;
                     if (this->on_reel_stop) this->on_reel_stop(this, reel); 
                 }
             }
+            else {
+                offsets[reel] += speed * dt;
+                done = false;
+
+                while (offsets[reel] > row_height) {
+                    buffer.advance(reel, upper_buffer[reel]);
+                    upper_buffer[reel] = weights.generate();
+                    offsets[reel] -= row_height;
+
+                    spin_iter[reel]++;
+                    if (spin_iter[reel] >= required_distance) {
+                    }
+                }
+            }
         }
+
         if (done) {
             spinning = false;
             if (this->on_stop) this->on_stop(this);
@@ -337,7 +370,7 @@ void Slot::draw() {
                 .y = this->rect.y + gap_y * (row + 1) + row * 40 + offsets[reel],
             };
 
-            DrawTexture(tex_tiles[tile], pos.x, pos.y, WHITE);
+            DrawTexture(tiles[tile].texture, pos.x, pos.y, WHITE);
         }
     }
 
@@ -438,15 +471,25 @@ struct M1X1 : SlotMachine {
         slot.stake   = 10;
         slot.reels   = 1;
         slot.rows    = 1;
-        slot.speed   = 400;
-        slot.spin_distance = 13;
-        payouts = { 0, 0, 1.5, 2.5, 6 };
+        slot.speed   = 1000;
+        slot.spin_distance = 20;
+        payouts = { 0, 3, 7, 15, 20 };
         texture = tex_m1x1;
 
-        slot.weights.add(1, 4);
-        slot.weights.add(2, 3);
-        slot.weights.add(3, 2);
-        slot.weights.add(4, 1);
+        slot.weights.add(0, 23);
+        slot.weights.add(1, 7);
+        slot.weights.add(2, 5);
+        slot.weights.add(3, 3);
+        slot.weights.add(4, 2);
+
+        slot.tiles = {
+            { .id = 0, .texture = tex_tile_dot },
+            { .id = 1, .texture = tex_tile_orange },
+            { .id = 2, .texture = tex_tile_cherry },
+            { .id = 3, .texture = tex_tile_7 },
+            { .id = 4, .texture = tex_tile_k },
+            { .id = 4, .texture = tex_tile_k },
+        };
 
         calculate_ev();
         printf("Spawned M1X1 (RTP: %.2f%%, Win Chance: %.2f%%)\n", ev*100, win_percent*100);
@@ -469,11 +512,24 @@ struct M3X1 : SlotMachine {
         slot.stake   = 10;
         slot.reels   = 3;
         slot.rows    = 1;
-        payouts      = { 0, 7, 20, 40 };
-        texture      = tex_m3x1;
+        slot.speed   = 800;
+        slot.spin_distance = 20;
+        slot.spin_distance_per_reel = 4;
+        slot.reel_offset_time = 0.2;
+        texture = tex_m3x1;
+        payouts = { 20, 100, 200, 5000 };
+
+        slot.tiles = {
+            { .id = 0, .texture = tex_tile_orange  },
+            { .id = 1, .texture = tex_tile_cherry  },
+            { .id = 2, .texture = tex_tile_7 },
+            { .id = 3, .texture = tex_tile_777  },
+        };
+
+        slot.weights.add(0, 10);
         slot.weights.add(1, 5);
         slot.weights.add(2, 3);
-        slot.weights.add(3, 2);
+        slot.weights.add(3, 1);
 
         calculate_ev();
         printf("Spawned M3X1 (RTP: %.2f%%, Win Chance: %.2f%%)\n", ev*100, win_percent*100);
@@ -493,7 +549,7 @@ struct M3X1 : SlotMachine {
 
     virtual void on_reel_stop(int reel) override {
         if (reel == 1 && slot.buffer.at(0,0) == slot.buffer.at(1,0)) {
-            slot.current_spin_distance += 10;
+            slot.current_spin_distance += 20;
             anticipation = true;
         }
     }
@@ -630,8 +686,10 @@ struct ShopEntry_Machine : ShopEntry {
         Machine* machine = this->construct();
 
         for (int i = 0; i < 9; i++)
-            if (spot_unlocked[i] && !machines[i])
+            if (spot_unlocked[i] && !machines[i]) {
                 machines[i] = machine;
+                break;
+            }
     }
 };
 
@@ -648,12 +706,18 @@ int main() {
     tex_m1x1 = LoadTexture("assets/m1x1.png");
     tex_m3x1 = LoadTexture("assets/m3x1.png");
 
-    tex_tiles[0] = LoadTexture("assets/tile0.png");
-    tex_tiles[1] = LoadTexture("assets/tile1.png");
-    tex_tiles[2] = LoadTexture("assets/tile2.png");
-    tex_tiles[3] = LoadTexture("assets/tile3.png");
-    tex_tiles[4] = LoadTexture("assets/tile4.png");
-    tex_tiles[5] = LoadTexture("assets/tile5.png");
+    tex_tile_0        = LoadTexture("assets/tile_0.png");
+    tex_tile_dot      = LoadTexture("assets/tile_dot.png");
+    tex_tile_cherry   = LoadTexture("assets/tile_cherry.png");
+    tex_tile_orange   = LoadTexture("assets/tile_orange.png");
+    tex_tile_7        = LoadTexture("assets/tile_7.png");
+    tex_tile_777      = LoadTexture("assets/tile_777.png");
+
+    tex_tile_9     = LoadTexture("assets/tile_9.png");
+    tex_tile_10    = LoadTexture("assets/tile_10.png");
+    tex_tile_j     = LoadTexture("assets/tile_j.png");
+    tex_tile_q     = LoadTexture("assets/tile_q.png");
+    tex_tile_k     = LoadTexture("assets/tile_k.png");
 
     // --- Init gameplay ------------------------------------------
 
@@ -669,14 +733,9 @@ int main() {
     shop_entries.push_back(new ShopEntry_Machine(
         "3X1",
         "A more civilized slot machine",
-        800,
+        500,
         []() -> Machine* { return new M3X1(); }
     ));
-
-    // M1X1* m1x1 = new M1X1();
-    // machines[0] = m1x1;
-    // M3X1* m3x1 = new M3X1();
-    // machines[1] = m3x1;
 
     display_money = money;
 
