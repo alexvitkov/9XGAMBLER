@@ -703,19 +703,20 @@ struct MB5 : SlotMachine {
         slot.reels   = 4;
         slot.rows    = 3;
         slot.speed   = 800;
-        slot.spin_distance = 20;
+        slot.spin_distance = 25;
         slot.spin_distance_per_reel = 4;
-        slot.reel_offset_time = 0.2;
-        texture = tex_m3x1;
-        payouts = { 20, 100, 200, 5000 };
-        slot.weights = {{0,10}, {1,5}, {2,3}, {3,1}};
+        slot.reel_offset_time = 0.1;
+        texture = tex_mb5;
+        payouts = { 0, 20, 100, 800, 1200 };
+        slot.weights = {{0,8}, {1,5}, {2,3}, {3,2}, {4,2}};
         slot.tick_rate = 0.15;
 
         slot.tiles = {
-            { .id = 0, .texture = tex_tile_orange  },
-            { .id = 1, .texture = tex_tile_cherry  },
-            { .id = 2, .texture = tex_tile_7 },
-            { .id = 3, .texture = tex_tile_777  },
+            { .id = 0, .texture = tex_tile_dot  },
+            { .id = 1, .texture = tex_tile_orange  },
+            { .id = 2, .texture = tex_tile_cherry  },
+            { .id = 3, .texture = tex_tile_7 },
+            { .id = 4, .texture = tex_tile_777  },
         };
 
         calculate_ev();
@@ -725,28 +726,18 @@ struct MB5 : SlotMachine {
     }
 
     virtual Money calculate_win() override {
+        Money win = 0;
         for (SlotTile t : slot.tiles) {
             int count = 0;
-            for (int reel = 0; reel < reels; reel++)
-                for (int row = 0; row < rows; row++)
-                    if (slot.buffer.at(reel, row))
-                            ;
+            for (int reel = 0; reel < slot.reels; reel++)
+                for (int row = 0; row < slot.rows; row++)
+                    if (slot.buffer.at(reel, row) == t.id)
+                            count++;
+            if (count >= 5) {
+                win += this->payouts[t.id] * stake;
+            }
         }
-        Money win = 0;
-        if (slot.buffer.at(0,0) == slot.buffer.at(1,0) && slot.buffer.at(1,0) == slot.buffer.at(2,0)) {
-            return payouts[slot.buffer.at(0,0)] * this->stake;
-        }
-        else {
-            return 0;
-        }
-    }
-
-    virtual void on_reel_stop(int reel) override {
-        if (reel == 1 && slot.buffer.at(0,0) == slot.buffer.at(1,0)) {
-            slot.current_spin_distance += 20;
-            if (msc_anticipation_count == 0) PlayMusicStream(msc_anticipation);
-            msc_anticipation_count++;
-        }
+        return win;
     }
 
     virtual void on_stop() override {
@@ -755,7 +746,7 @@ struct MB5 : SlotMachine {
     }
 
     virtual void draw_slot() override {
-        slot.rect = { pos.x + 5, pos.y + 60, 184, 100 };
+        slot.rect = { pos.x + 5, pos.y + 60, 184, 107 };
         slot.draw();
     }
 };
@@ -1079,7 +1070,7 @@ int main() {
     ShopEntry* shop_entry_mb5 = new ShopEntry_Machine(
         "BLOODY 5",
         "Get 5 of a kind to win. Medium Volatility",
-        500,
+        1000,
         []() -> Machine* { return new MB5(); },
         tex_mb5
     );
@@ -1104,8 +1095,8 @@ int main() {
     roll_shop();
 
     // --- Init taxes ---------------------------------------------
-    Timer_Tax* tax_car = new Timer_Tax("Car Payment", 60, 500);
-    Timer_Tax* tax_rent = new Timer_Tax("Rent", 120, 1000);
+    Timer_Tax* tax_car = new Timer_Tax("Car Payment", 199, 500);
+    Timer_Tax* tax_rent = new Timer_Tax("Rent", 299, 1000);
     timers.push_back(tax_car);
     timers.push_back(tax_rent);
 
