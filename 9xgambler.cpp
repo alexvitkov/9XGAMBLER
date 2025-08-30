@@ -47,6 +47,7 @@ struct Timer {
     const char* text;
     const char* tooltip;
     double time_left;
+    Money cost = 0;
 
     virtual bool action() = 0;
     virtual ~Timer() {}
@@ -254,6 +255,7 @@ const char*               tooltip         = nullptr;
 
 Texture tex_background;
 Texture tex_m3x1;
+Texture tex_mb5;
 Texture tex_m1x1;
 
 Texture tex_tile_0;
@@ -692,6 +694,72 @@ struct M3X1 : SlotMachine {
     }
 };
 
+struct MB5 : SlotMachine {
+    std::vector<float> payouts = {};
+
+    MB5() {
+        this->stake = 10;
+
+        slot.reels   = 4;
+        slot.rows    = 3;
+        slot.speed   = 800;
+        slot.spin_distance = 20;
+        slot.spin_distance_per_reel = 4;
+        slot.reel_offset_time = 0.2;
+        texture = tex_m3x1;
+        payouts = { 20, 100, 200, 5000 };
+        slot.weights = {{0,10}, {1,5}, {2,3}, {3,1}};
+        slot.tick_rate = 0.15;
+
+        slot.tiles = {
+            { .id = 0, .texture = tex_tile_orange  },
+            { .id = 1, .texture = tex_tile_cherry  },
+            { .id = 2, .texture = tex_tile_7 },
+            { .id = 3, .texture = tex_tile_777  },
+        };
+
+        calculate_ev();
+        printf("Spawned MB5 (RTP: %.2f%%, Win Chance: %.2f%%)\n", ev*100, win_percent*100);
+
+        slot.buffer = SlotBuffer::generate(slot.reels, slot.rows, slot.weights);
+    }
+
+    virtual Money calculate_win() override {
+        for (SlotTile t : slot.tiles) {
+            int count = 0;
+            for (int reel = 0; reel < reels; reel++)
+                for (int row = 0; row < rows; row++)
+                    if (slot.buffer.at(reel, row))
+                            ;
+        }
+        Money win = 0;
+        if (slot.buffer.at(0,0) == slot.buffer.at(1,0) && slot.buffer.at(1,0) == slot.buffer.at(2,0)) {
+            return payouts[slot.buffer.at(0,0)] * this->stake;
+        }
+        else {
+            return 0;
+        }
+    }
+
+    virtual void on_reel_stop(int reel) override {
+        if (reel == 1 && slot.buffer.at(0,0) == slot.buffer.at(1,0)) {
+            slot.current_spin_distance += 20;
+            if (msc_anticipation_count == 0) PlayMusicStream(msc_anticipation);
+            msc_anticipation_count++;
+        }
+    }
+
+    virtual void on_stop() override {
+        SlotMachine::on_stop();
+        last_auto_click_time = game_time;
+    }
+
+    virtual void draw_slot() override {
+        slot.rect = { pos.x + 5, pos.y + 60, 184, 100 };
+        slot.draw();
+    }
+};
+
 // --- Timers -------------------------------------------------
 
 struct Timer_Police : Timer {
@@ -715,7 +783,6 @@ struct Timer_Police : Timer {
 
 struct Timer_Tax : Timer {
     double t;
-    Money cost;
 
     Timer_Tax(const char* name, double t, Money cost) {
         this->text = name;
@@ -724,7 +791,7 @@ struct Timer_Tax : Timer {
         this->cost = cost;
     }
 
-    virtual bool action() {
+    virtual bool action() override {
         gain_money(-this->cost, {400.0f,400.0f});
         this->time_left = t;
         return true;
@@ -958,6 +1025,7 @@ int main() {
     tex_background = LoadTexture("assets/background.png");
     tex_m1x1 = LoadTexture("assets/m1x1.png");
     tex_m3x1 = LoadTexture("assets/m3x1.png");
+    tex_mb5 = LoadTexture("assets/mb5.png");
 
     tex_tile_0        = LoadTexture("assets/tile_0.png");
     tex_tile_dot      = LoadTexture("assets/tile_dot.png");
@@ -1008,6 +1076,14 @@ int main() {
         tex_m3x1
     );
 
+    ShopEntry* shop_entry_mb5 = new ShopEntry_Machine(
+        "BLOODY 5",
+        "Get 5 of a kind to win. Medium Volatility",
+        500,
+        []() -> Machine* { return new MB5(); },
+        tex_mb5
+    );
+
     // --- Init shop ----------------------------------------------
 
     ShopEntry* shop_entry_upgrade_speed = new ShopEntry_Upgrade(UpgradeType::Speed);
@@ -1016,6 +1092,7 @@ int main() {
 
     shop_machines_weights.add(shop_entry_m1x1, 8);
     shop_machines_weights.add(shop_entry_m3x1, 4);
+    shop_machines_weights.add(shop_entry_mb5, 3);
 
     shop_upgrades_weights.add(shop_entry_upgrade_auto_click, 1);
     shop_upgrades_weights.add(shop_entry_upgrade_double_stake, 1);
@@ -1283,10 +1360,25 @@ int main() {
         for (int i = 0; i < timers.size() && i < 5; i++) {
             Timer* timer = timers[i];
 
-            snprintf(buf, sizeof(buf), "%s - %d:%.2d", timer->text, int(timer->time_left / 60), int(floor(timer->time_left)) % 60);
-            DrawText(buf, 640, _y, 20, RED);
+            DrawRectangle(652, _y, 1024 - 650 - 5, 52, BLACK); 
 
-            _y += 24;
+            snprintf(buf, sizeof(buf), "%s", timer->text);
+            DrawText(buf, 660, _y, 20, WHITE);
+            _y += 25;
+
+
+            snprintf(buf, sizeof(buf), "%d:%.2d", int(timer->time_left / 60), int(floor(timer->time_left)) % 60);
+            int len = MeasureText(buf, 30);
+            DrawText(buf, 1024 - len - 10, _y, 30, WHITE);
+            // DrawText(buf, 660, _y, 30, WHITE);
+
+            if (timer->cost) {
+                snprintf(buf, sizeof(buf), "$%ld", timer->cost);
+                DrawText(buf, 660, _y, 30, WHITE);
+            }
+
+
+            _y += 34;
         }
 
         // --- Draw texts on screen -------------------------
