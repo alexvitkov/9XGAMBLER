@@ -1,5 +1,6 @@
 #include "raylib.h"
 #include <stdint.h>
+#include <initializer_list>
 #include <assert.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -37,6 +38,17 @@ typedef int64_t  i64;
 
 typedef i64 Money;
 
+enum class ShopEntryType {
+    Machine,
+    Upgrade,
+};
+
+enum class UpgradeType {
+    Speed,
+    Auto_Click,
+    Double_Stake,
+};
+
 struct TextOnScreen {
     std::string text     = 0;
     Vector2     pos      = {};
@@ -71,30 +83,44 @@ struct Machine {
     int shake_y = 0;
     double shake_time = 0;
 
+    Money stake          = 1;
+
     virtual void update() = 0;
     virtual void draw() = 0;
+    virtual void upgrade(UpgradeType type) = 0;
 
     void shake();
 };
 
 struct ShopEntry {
-    const char* name;
+    const char* name = "";
+    const char* tagline = "";
     virtual Money cost() { return 0; }
     virtual const char* lock_reason() { return nullptr; }
     virtual void buy() { }
-    virtual bool should_remove() { return false; }
+    virtual void draw_icon(int x, int y) {
+        DrawRectangle(x, y, 130, 180, RED);
+    };
 };
 
 template <typename T>
 struct Weights {
     std::vector<T> array;
 
+    Weights() {
+    }
+
+    Weights(std::initializer_list<std::pair<T, int>> list) {
+        for (auto& item : list)
+            add(item.first, item.second);
+    }
+
     void add(T entry, int weight) {
         for (int i = 0; i < weight; i++)
             array.push_back(entry);
     }
 
-    int generate() {
+    T generate() {
         return array[GetRandomValue(0, array.size() - 1)];
     }
 };
@@ -142,7 +168,6 @@ struct Slot {
     float             reel_offset_time = 0.1;
     int               spin_distance    = 10;
     int               spin_distance_per_reel = 3;
-    Money             stake            = 1;
     SlotBuffer        buffer           = {};
     int               reels            = {};
     int               rows             = {};
@@ -162,7 +187,7 @@ struct Slot {
     void (*on_stop)(Slot* slot) = nullptr;
 
     Rectangle get_reel_rect(int reel);
-    void spin(Vector2 pos);
+    void spin(Money stake, Vector2 pos);
 
     void update();
     void draw();
@@ -173,16 +198,19 @@ struct Slot {
 struct SlotMachine : Machine {
     Slot slot = {};
     Texture texture = {};
+    float auto_click_time = -1;
+    double last_auto_click_time = 0;
 
-    virtual void update();
+    virtual void update() override;
+    virtual void upgrade(UpgradeType type) override;
     virtual void calculate_ev();
     virtual Money calculate_win() = 0;
     virtual void on_reel_stop(int reel) {}
     virtual void on_stop();
 
-    virtual void draw();
+    virtual void draw() override;
     virtual void draw_background();
-    virtual void draw_button();
+    virtual void draw_spin_button();
     virtual void draw_slot();
 
     SlotMachine();
@@ -224,9 +252,9 @@ Texture tex_tile_k;
 
 // --- Game state ---------------------------------------------
 
-
-GameScreen  screen = GameScreen::Machines;
-Money       money  = 1500;
+GameScreen  screen    = GameScreen::Machines;
+Money       money     = 1500;
+Money       roll_cost = 50;
 
 const Money spot_prices[9] = {
     100,    200,    2000,
@@ -239,10 +267,20 @@ Machine* machines[9] = {};
 double display_money = 0;
 
 std::vector<ShopEntry*> shop_entries;
-int shop_page = 0;
 
 void gain_money(Money money, Vector2 pos);
 bool button(ButtonState state);
+
+Weights<ShopEntryType> shop_types_weights;
+Weights<ShopEntry*> shop_machines_weights;
+Weights<ShopEntry*> shop_upgrades_weights;
+
+// machine selection
+bool select_machine = false;
+const char* select_machine_text = nullptr;
+void (*select_machine_callback)(Machine* machine);
+void* select_machine_callback_userdata;
+UpgradeType current_upgarde_type;
 
 // --- Utils --------------------------------------------------
 
@@ -279,7 +317,7 @@ void Machine::shake() {
 
 // --- Slot methods -------------------------------------------
 
-void Slot::spin(Vector2 pos) {
+void Slot::spin(Money stake, Vector2 pos) {
     if (!spinning) {
         for (int reel = 0; reel < reels; reel++) {
             upper_buffer[reel] = weights.generate();
@@ -400,11 +438,30 @@ void SlotMachine::update() {
     slot.update();
 }
 
+void SlotMachine::upgrade(UpgradeType type) {
+    switch (type) {
+        case UpgradeType::Speed: {
+            slot.speed *= 1.3;
+            slot.reel_offset_time /= 1.3;
+            break;
+        }
+        case UpgradeType::Double_Stake: {
+            stake *= 2;
+            break;
+        }
+        case UpgradeType::Auto_Click: {
+            if (auto_click_time < 0) auto_click_time = 5;
+            else auto_click_time /= 2;
+            break;
+        }
+    }
+}
+
 void SlotMachine::draw_background() {
     DrawTexture(texture, pos.x, pos.y - 9, WHITE);
 }
 
-void SlotMachine::draw_button() {
+void SlotMachine::draw_spin_button() {
     Color color = { 0, 0, 255, 255 };
 
     Rectangle button = {
@@ -420,13 +477,18 @@ void SlotMachine::draw_button() {
         color = { 0, 0, 160, 80 };
     }
     else {
-        if (CheckCollisionPointRec(mouse, button)) {
-            color = Color { 32, 80, 255, 255 };
-
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
-                slot.spin({button.x, button.y});
-            }
+        bool spin = false;
+        if (auto_click_time >= 0 && game_time - last_auto_click_time > auto_click_time) {
+            spin = true;
+            last_auto_click_time = game_time;
         }
+
+        if (CheckCollisionPointRec(mouse, button) && !select_machine) {
+            color = Color { 32, 80, 255, 255 };
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) spin = true;
+        }
+
+        if (spin) slot.spin(stake, {button.x, button.y});
     }
 
     DrawRectangleRec(button, color);
@@ -438,7 +500,7 @@ void SlotMachine::draw() {
 
     draw_background();
     draw_slot();
-    draw_button();
+    draw_spin_button();
 }
 
 void SlotMachine::draw_slot() {
@@ -467,20 +529,16 @@ struct M1X1 : SlotMachine {
     std::vector<float> payouts = {};
 
     M1X1() {
+        this->stake   = 10;
+
         slot.machine = this;
-        slot.stake   = 10;
         slot.reels   = 1;
         slot.rows    = 1;
         slot.speed   = 1000;
         slot.spin_distance = 20;
         payouts = { 0, 3, 7, 15, 20 };
+        slot.weights = { {0, 23}, {1,7}, {2,5}, {3,3}, {4,2} };
         texture = tex_m1x1;
-
-        slot.weights.add(0, 23);
-        slot.weights.add(1, 7);
-        slot.weights.add(2, 5);
-        slot.weights.add(3, 3);
-        slot.weights.add(4, 2);
 
         slot.tiles = {
             { .id = 0, .texture = tex_tile_dot },
@@ -498,7 +556,7 @@ struct M1X1 : SlotMachine {
     }
 
     virtual Money calculate_win() override {
-        return payouts[slot.buffer.at(0,0)] * slot.stake;
+        return payouts[slot.buffer.at(0,0)] * stake;
     }
 };
 
@@ -509,7 +567,8 @@ struct M3X1 : SlotMachine {
     std::vector<float> payouts = {};
 
     M3X1() {
-        slot.stake   = 10;
+        this->stake = 10;
+
         slot.reels   = 3;
         slot.rows    = 1;
         slot.speed   = 800;
@@ -518,6 +577,7 @@ struct M3X1 : SlotMachine {
         slot.reel_offset_time = 0.2;
         texture = tex_m3x1;
         payouts = { 20, 100, 200, 5000 };
+        slot.weights = {{0,10}, {1,5}, {2,3}, {3,1}};
 
         slot.tiles = {
             { .id = 0, .texture = tex_tile_orange  },
@@ -525,11 +585,6 @@ struct M3X1 : SlotMachine {
             { .id = 2, .texture = tex_tile_7 },
             { .id = 3, .texture = tex_tile_777  },
         };
-
-        slot.weights.add(0, 10);
-        slot.weights.add(1, 5);
-        slot.weights.add(2, 3);
-        slot.weights.add(3, 1);
 
         calculate_ev();
         printf("Spawned M3X1 (RTP: %.2f%%, Win Chance: %.2f%%)\n", ev*100, win_percent*100);
@@ -540,7 +595,7 @@ struct M3X1 : SlotMachine {
     virtual Money calculate_win() override {
         Money win = 0;
         if (slot.buffer.at(0,0) == slot.buffer.at(1,0) && slot.buffer.at(1,0) == slot.buffer.at(2,0)) {
-            return payouts[slot.buffer.at(0,0)] * slot.stake;
+            return payouts[slot.buffer.at(0,0)] * this->stake;
         }
         else {
             return 0;
@@ -556,6 +611,7 @@ struct M3X1 : SlotMachine {
 
     virtual void on_stop() override {
         SlotMachine::on_stop();
+        last_auto_click_time = game_time;
         anticipation = false;
     }
 
@@ -611,13 +667,14 @@ bool button(ButtonState state) {
 }
 
 void go_to_screen(GameScreen _screen) {
+    if (select_machine) return;
+
     if (screen == _screen) return;
 
     screen = _screen;
 
     switch (screen) {
         case GameScreen::Shop: {
-            shop_page = 0;
             break;
         }
         default: break;
@@ -632,46 +689,51 @@ void buy_spot(int i) {
     }
 }
 
+ShopEntry* roll_shop_entry() {
 
-struct ShopEntry_BuyNextSpot : ShopEntry {
-    ShopEntry_BuyNextSpot() {
-        this->name = "Buy next Machine Spot";
+    switch (shop_types_weights.generate()) {
+        case ShopEntryType::Machine: {
+            return shop_machines_weights.generate();
+        }
+        case ShopEntryType::Upgrade: {
+            return shop_upgrades_weights.generate();
+        }
     }
+}
 
-    virtual bool should_remove() override {
-        return next_spot_to_buy() == -1;
+void roll_shop() {
+    shop_entries.clear();
+    for (int i = 0; i < 3; i++) {
+        shop_entries.push_back(roll_shop_entry());
     }
+}
 
-    virtual Money cost() override {
-        return spot_prices[next_spot_to_buy()];
-    }
-
-    virtual void buy() override {
-        buy_spot(next_spot_to_buy());
-    }
-
-    int next_spot_to_buy() {
-        for (int i = 0; i < 9; i++)
-            if (!spot_unlocked[i])
-                return i;
-        return -1;
-    }
-};
+void apply_upgrade(Machine* machine, UpgradeType type) {
+    select_machine = false;
+    machine->upgrade(type);
+}
 
 struct ShopEntry_Machine : ShopEntry {
     std::string text;
     Money _cost;
     Machine* (*construct)();
+    Texture tex;
 
-    ShopEntry_Machine(const char* name, const char* tagline, Money cost, Machine* (*construct)()) {
-        this->text = std::format("Buy {}", name);
+    ShopEntry_Machine(const char* name, const char* tagline, Money cost, Machine* (*construct)(), Texture tex) {
+        this->text = std::format("{} - Machine", name);
+        this->tagline = tagline;
         this->name = this->text.c_str();
         this->_cost = cost;
         this->construct = construct;
+        this->tex = tex;
     }
 
     virtual Money cost() override {
         return this->_cost;
+    }
+
+    virtual void draw_icon(int x, int y) override {
+        DrawTextureEx(tex, {float(x),float(y)}, 0, 0.73, WHITE);
     }
 
     virtual const char* lock_reason() override {
@@ -691,6 +753,62 @@ struct ShopEntry_Machine : ShopEntry {
                 break;
             }
     }
+};
+
+struct ShopEntry_Upgrade : ShopEntry {
+    UpgradeType type;
+    Money _cost;
+
+    ShopEntry_Upgrade(UpgradeType type) {
+        this->type = type;
+        this->_cost = 200;
+
+        switch (this->type) {
+            case UpgradeType::Speed: {
+                this->name = "SPEED UPGRADE";
+                this->tagline = "Increase a Machine's Speed";
+
+                break;
+            }
+            case UpgradeType::Auto_Click: {
+                this->name = "AUTO SPIN UPGRADE";
+                this->tagline = "Increase a Machine's Auto Spin Rate";
+                break;
+            }
+            case UpgradeType::Double_Stake: {
+                this->name = "STAKE DOUBLE UPGRADE";
+                this->tagline = "Double a Machine's Stake (and thus wins!)";
+                break;
+            }
+        }
+
+        this->tagline = tagline;
+    }
+
+    virtual Money cost() override {
+        return this->_cost;
+    }
+
+    virtual void buy() override {
+        select_machine = true;
+        select_machine_text = this->name;
+        select_machine_callback = [](Machine* machine) {
+            apply_upgrade(machine, current_upgarde_type);
+        };
+        current_upgarde_type = this->type;
+        _cost *= 2;
+    }
+
+    virtual const char* lock_reason() override {
+        for (int i = 0; i < 9; i++)
+            if (machines[i])
+                return nullptr;
+        return "Buy some machines first";
+    }
+
+    virtual void draw_icon(int x, int y) override {
+        DrawRectangle(x, y, 130, 180, GOLD);
+    };
 };
 
 // --- Send it ------------------------------------------------
@@ -721,21 +839,37 @@ int main() {
 
     // --- Init gameplay ------------------------------------------
 
-    shop_entries.push_back(new ShopEntry_BuyNextSpot());
-
-    shop_entries.push_back(new ShopEntry_Machine(
+    ShopEntry* shop_entry_m1x1 = new ShopEntry_Machine(
         "1X1",
-        "Baby's first slot machine",
+        "Baby's first slot machine. Low Volatility",
         500,
-        []() -> Machine* { return new M1X1(); }
-    ));
+        []() -> Machine* { return new M1X1(); },
+        tex_m1x1
+    );
 
-    shop_entries.push_back(new ShopEntry_Machine(
+    ShopEntry* shop_entry_m3x1 = new ShopEntry_Machine(
         "3X1",
-        "A more civilized slot machine",
+        "Match 3 to win. Medium Volatility",
         500,
-        []() -> Machine* { return new M3X1(); }
-    ));
+        []() -> Machine* { return new M3X1(); },
+        tex_m3x1
+    );
+
+    ShopEntry* shop_entry_upgrade_speed = new ShopEntry_Upgrade(UpgradeType::Speed);
+    ShopEntry* shop_entry_upgrade_auto_click = new ShopEntry_Upgrade(UpgradeType::Auto_Click);
+    ShopEntry* shop_entry_upgrade_double_stake = new ShopEntry_Upgrade(UpgradeType::Double_Stake);
+
+    shop_machines_weights.add(shop_entry_m1x1, 8);
+    shop_machines_weights.add(shop_entry_m3x1, 4);
+
+    shop_upgrades_weights.add(shop_entry_upgrade_auto_click, 1);
+    shop_upgrades_weights.add(shop_entry_upgrade_double_stake, 1);
+    shop_upgrades_weights.add(shop_entry_upgrade_speed, 1);
+
+    shop_types_weights.add(ShopEntryType::Machine, 10);
+    shop_types_weights.add(ShopEntryType::Upgrade, 2);
+
+    roll_shop();
 
     display_money = money;
 
@@ -795,11 +929,18 @@ int main() {
                     int x = TOP_PADDING + (i % 3) * (MACHINE_WIDTH + MACHINE_GAP_X);
                     int y = RIGHT_PADDING + (i / 3) * (MACHINE_HEIGHT + MACHINE_GAP_Y);
 
-
                     if (machine) {
                         machine->pos.x = x;
                         machine->pos.y = y;
                         machine->draw();
+
+                        Rectangle r = { (float)x-8, (float)y-8, MACHINE_WIDTH+16, MACHINE_HEIGHT+16 };
+                        if (select_machine && CheckCollisionPointRec(mouse, r)) {
+                            DrawRectangleLinesEx(r, 4, Color{0,255,0,255});
+                            if (IsMouseButtonPressed(0)) {
+                                select_machine_callback(machine);
+                            }
+                        }
                     }
                     else {
                         DrawRectangle(x, y, MACHINE_WIDTH, MACHINE_HEIGHT, Color{0, 0, 0, 90});
@@ -822,7 +963,7 @@ int main() {
                             _y += 50;
 
                             char buf[64];
-                            snprintf(buf, _y, "Price: $%lld", spot_prices[i]);
+                            snprintf(buf, _y, "Price: $%ld", spot_prices[i]);
                             DrawText(buf, x + 10, y + 90, 20,  enabled ? GREEN : RED);
                             _y += 30;
 
@@ -830,7 +971,7 @@ int main() {
                                 .rect = Rectangle{float(x + 8), float(_y), MACHINE_WIDTH - 16, y + MACHINE_HEIGHT - _y - 8 },
                                 .text = "BUY",
                                 .enabled = enabled,
-                            })) {
+                            }) && !select_machine) {
                                 buy_spot(i);
                             }
                         }
@@ -857,58 +998,78 @@ int main() {
                 DrawLineEx({x_start, y}, {x_end, y}, 4, WHITE);
                 y += 20;
 
-                int start = shop_page * 8;
-                int end = 8;
-                if (start < 0) start = 0;
-                if (end > shop_entries.size()) end = shop_entries.size();
 
+                for (int i = 0; i < shop_entries.size(); i++) {
+                    const int height = 200;
+                    DrawRectangle(x_start, y, x_end - x_start, height, BLACK);
 
-                for (int i = start; i < end; i++) {
                     ShopEntry* entry = shop_entries[i];
-                    if (entry->should_remove()) {
-                        delete entry;
-                        shop_entries.erase(shop_entries.begin() + i);
-                        i--;
+                    if (!entry) {
+                        y += height + 10;
+                        continue;
                     }
-                    else {
-                        Money cost = entry->cost();
-                        bool can_afford = money >= cost;
-                        const char* lock_reason = entry->lock_reason();
 
-                        DrawRectangle(x_start, y, x_end - x_start, 60, BLACK);
-                        DrawText(entry->name, x_start + 4, y + 4, 20, WHITE);
+                    Money cost = entry->cost();
+                    bool can_afford = money >= cost;
+                    const char* lock_reason = entry->lock_reason();
 
-                        char buf[64] = {};
-                        snprintf(buf, 64, "$%lld", cost);
 
-                        int len = MeasureText(buf, 40);
-                        DrawText(buf, x_end - 130 - 8 - len, y + 10, 40, can_afford ? WHITE : RED);
 
-                        Rectangle button_rect = { x_end - 130, y + 6, 122, 47 };
-                        if (button({
-                            .rect         = button_rect,
-                            .text         = "BUY",
-                            .font_size    = 40,
-                            .enabled      = can_afford && !entry->lock_reason(),
-                        })) {
-                            entry->buy();
-                        }
+                    entry->draw_icon(x_start + 10, y + 10);
+                    DrawText(entry->name, x_start + 150, y + 4, 20, WHITE);
+                    DrawText(entry->tagline, x_start + 150, y + 24, 20, WHITE);
 
-                        if (CheckCollisionPointRec(mouse, button_rect)) {
-                            if (lock_reason)
-                                tooltip = lock_reason;
-                            else if (!can_afford)
-                                tooltip = "Can't afford.";
-                        }
+                    char buf[64] = {};
+                    snprintf(buf, 64, "$%ld", cost);
 
-                        y += 70;
+                    int len = MeasureText(buf, 40);
+                    DrawText(buf, x_end - 130 - 8 - len, y + 10 + 134, 40, can_afford ? WHITE : RED);
+
+                    Rectangle button_rect = { x_end - 130, y + 6 + 134, 122, 47 };
+                    if (button({
+                        .rect         = button_rect,
+                        .text         = "BUY",
+                        .font_size    = 40,
+                        .enabled      = can_afford && !entry->lock_reason(),
+                    })) {
+                        go_to_screen(GameScreen::Machines);
+                        entry->buy();
+                        shop_entries[i] = nullptr;
                     }
+
+                    if (CheckCollisionPointRec(mouse, button_rect)) {
+                        if (lock_reason)
+                            tooltip = lock_reason;
+                        else if (!can_afford)
+                            tooltip = "Can't afford.";
+                    }
+
+                    y += height + 10;
                 }
+
+                char buf[256];
+                snprintf(buf, sizeof(buf), "REROLL - $%ld", roll_cost);
+
+                Rectangle button_rect = { x_start, y, 400, 50 };
+                if (button({
+                    .rect         = button_rect,
+                    .text         = buf,
+                    .background   = DARKGREEN,
+                    .font_size    = 40,
+                    .enabled      = money >= roll_cost,
+                })) {
+                    roll_cost *= 1.2f;
+                    gain_money(-roll_cost, mouse);
+                    roll_shop();
+                }
+
+
 
             }
         }
 
-        // --- Draw Money ------------------------------------------
+
+        // --- Draw money ------------------------------------------
         char buf[64];
         display_money = Lerp(display_money, double(money), 10 * dt);
         snprintf(buf, 64, "%ld", i64(roundf(display_money)));
@@ -916,14 +1077,14 @@ int main() {
         DrawText(buf, 714, _y, 40, WHITE);
         _y += 50;
 
-        // --- Draw Time Spent Solvent -----------------------------
+        // --- Draw time spent solvent -----------------------------
         double time_solvent = game_time - run_start_time;
         snprintf(buf, 64, "%d:%.2d", int(time_solvent / 60), int(floor(time_solvent)) % 60);
         DrawText("Time spent Solvent", 700, _y, 20, WHITE);
         DrawText(buf, 900, _y, 40, WHITE);
         _y += 30;
 
-        // --- Draw Shop button -----------------------------
+        // --- Draw shop button -----------------------------
         if (button({
             .rect         = { 700, float(_y), 150, 45 },
             .text         = "SHOP",
@@ -957,6 +1118,12 @@ int main() {
                 texts.pop_back();
                 i--;
             }
+        }
+
+        if (select_machine) {
+            DrawRectangle(600, 0, 1024, 100, BLACK);
+            DrawText("SELECT MACHINE", 610, 10, 40, WHITE);
+            DrawText(select_machine_text, 610, 50, 20, WHITE);
         }
 
         if (tooltip) {
