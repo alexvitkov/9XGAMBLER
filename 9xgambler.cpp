@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <format>
+#include <algorithm>
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))
 
@@ -28,6 +29,8 @@
 #define MAX_SLOT_ROWS  5
 #define UPGRADE_COST_INCREASE_FACTOR 1.3
 #define ROLL_COST_INCREASE_FACTOR 1.1
+#define POLICE_TIME 60
+#define START_MAX_UPGRADES 5
 
 typedef uint8_t  u8;
 typedef uint16_t u16;
@@ -44,7 +47,9 @@ struct Timer {
     const char* text;
     const char* tooltip;
     double time_left;
-    virtual void callback() = 0;
+
+    virtual bool action() = 0;
+    virtual ~Timer() {}
 };
 
 enum class ShopEntryType {
@@ -91,12 +96,16 @@ struct Machine {
     int shake_x = 0;
     int shake_y = 0;
     double shake_time = 0;
-
-    Money stake          = 1;
+    int upgrades = 0;
+    Money stake = 1;
 
     virtual void update() = 0;
     virtual void draw() = 0;
-    virtual void upgrade(UpgradeType type) = 0;
+    virtual ~Machine() {}
+
+    virtual void upgrade(UpgradeType type) {
+        upgrades++;
+    }
 
     void shake();
 };
@@ -261,9 +270,12 @@ Texture tex_tile_k;
 
 // --- Game state ---------------------------------------------
 
-GameScreen  screen    = GameScreen::Machines;
-Money       money     = 1500;
-Money       roll_cost = 50;
+GameScreen  screen       = GameScreen::Machines;
+Money       money        = 1500;
+Money       roll_cost    = 50;
+int         max_upgrades = START_MAX_UPGRADES;
+std::vector<Timer*> timers;
+Timer* police_timer = nullptr;
 
 const Money spot_prices[9] = {
     100,    200,    2000,
@@ -290,6 +302,7 @@ const char* select_machine_text = nullptr;
 void (*select_machine_callback)(Machine* machine);
 void* select_machine_callback_userdata;
 UpgradeType current_upgarde_type;
+bool has_illegal_machines = false;
 
 // --- Utils --------------------------------------------------
 
@@ -448,6 +461,8 @@ void SlotMachine::update() {
 }
 
 void SlotMachine::upgrade(UpgradeType type) {
+    Machine::upgrade(type);
+
     switch (type) {
         case UpgradeType::Speed: {
             slot.speed *= 1.3;
@@ -634,6 +649,44 @@ struct M3X1 : SlotMachine {
     }
 };
 
+// --- Timers -------------------------------------------------
+
+struct Timer_Police : Timer {
+    Timer_Police() {
+        text = "POLICE";
+    }
+
+    virtual bool action() {
+        for (int i = 0; i < 9; i++) {
+            if (machines[i] && machines[i]->upgrades > max_upgrades) {
+                delete machines[i];
+                machines[i] = nullptr;
+            }
+        }
+        police_timer = nullptr;
+        has_illegal_machines = false;
+        return false;
+    }
+};
+
+struct Timer_Tax : Timer {
+    double t;
+    Money cost;
+
+    Timer_Tax(const char* name, double t, Money cost) {
+        this->text = name;
+        this->t = t;
+        this->time_left = t;
+        this->cost = cost;
+    }
+
+    virtual bool action() {
+        gain_money(-this->cost, {400.0f,400.0f});
+        this->time_left = t;
+        return true;
+    }
+};
+
 // --- Gameplay functions -------------------------------------
 
 void gain_money(Money amount, Vector2 pos) {
@@ -717,10 +770,32 @@ void roll_shop() {
     }
 }
 
+void check_illegal_machines() {
+    bool ok = true;
+    for (Machine* machine : machines)
+        if (machine && machine->upgrades > max_upgrades)
+            ok = false;
+
+    if (!ok == has_illegal_machines)
+        return;
+
+    has_illegal_machines = !ok;
+
+    if (has_illegal_machines) {
+        police_timer = new Timer_Police();
+        police_timer->time_left = POLICE_TIME;
+        timers.push_back(police_timer);
+    }
+}
+
 void apply_upgrade(Machine* machine, UpgradeType type) {
     select_machine = false;
     machine->upgrade(type);
+
+    check_illegal_machines();
 }
+
+// --- Shop entries -------------------------------------------
 
 struct ShopEntry_Machine : ShopEntry {
     std::string text;
@@ -799,6 +874,7 @@ struct ShopEntry_Upgrade : ShopEntry {
     }
 
     virtual void buy() override {
+        gain_money(-_cost, mouse);
         select_machine = true;
         select_machine_text = this->name;
         select_machine_callback = [](Machine* machine) {
@@ -864,6 +940,8 @@ int main() {
         tex_m3x1
     );
 
+    // --- Init shop ----------------------------------------------
+
     ShopEntry* shop_entry_upgrade_speed = new ShopEntry_Upgrade(UpgradeType::Speed);
     ShopEntry* shop_entry_upgrade_auto_click = new ShopEntry_Upgrade(UpgradeType::Auto_Click);
     ShopEntry* shop_entry_upgrade_double_stake = new ShopEntry_Upgrade(UpgradeType::Double_Stake);
@@ -879,6 +957,12 @@ int main() {
     shop_types_weights.add(ShopEntryType::Upgrade, 3);
 
     roll_shop();
+
+    // --- Init taxes ---------------------------------------------
+    Timer_Tax* tax_car = new Timer_Tax("Car Payment", 60, 500);
+    Timer_Tax* tax_rent = new Timer_Tax("Rent", 120, 1000);
+    timers.push_back(tax_car);
+    timers.push_back(tax_rent);
 
     display_money = money;
 
@@ -924,6 +1008,22 @@ int main() {
 
         for (int i = 0; i < 9; i++) {
             if (machines[i]) machines[i]->update();
+        }
+
+        // --- Simulate timers ----------------------------------------
+
+        for (int i = 0; i < timers.size(); i++) {
+            Timer* timer = timers[i];
+            timer->time_left -= dt;
+
+            if (timer->time_left < 0) {
+                if (!timer->action()) {
+                    delete timer;
+                    timers[i] = timers.back();
+                    timers.pop_back();
+                    i--;
+                }
+            }
         }
 
         // --- Render game --------------------------------------------
@@ -1071,14 +1171,12 @@ int main() {
                     gain_money(-roll_cost, mouse);
                     roll_shop();
                 }
-
-
-
             }
         }
 
 
         // --- Draw money ------------------------------------------
+
         char buf[64];
         display_money = Lerp(display_money, double(money), 10 * dt);
         snprintf(buf, 64, "%ld", i64(roundf(display_money)));
@@ -1087,6 +1185,7 @@ int main() {
         _y += 50;
 
         // --- Draw time spent solvent -----------------------------
+
         double time_solvent = game_time - run_start_time;
         snprintf(buf, 64, "%d:%.2d", int(time_solvent / 60), int(floor(time_solvent)) % 60);
         DrawText("Time spent Solvent", 700, _y, 20, WHITE);
@@ -1094,6 +1193,7 @@ int main() {
         _y += 30;
 
         // --- Draw shop button -----------------------------
+
         if (button({
             .rect         = { 700, float(_y), 150, 45 },
             .text         = "SHOP",
@@ -1103,6 +1203,22 @@ int main() {
         })) {
             go_to_screen(screen == GameScreen::Shop ? GameScreen::Machines : GameScreen::Shop);
         }
+
+        // --- Draw timers ----------------------------------
+
+        std::sort(timers.begin(), timers.end(), [](const Timer* a, const Timer* b) { return a->time_left < b->time_left; });
+
+        _y += 50;
+        for (int i = 0; i < timers.size() && i < 5; i++) {
+            Timer* timer = timers[i];
+
+            snprintf(buf, sizeof(buf), "%s - %d:%.2d", timer->text, int(timer->time_left / 60), int(floor(timer->time_left)) % 60);
+            DrawText(buf, 640, _y, 20, RED);
+
+            _y += 24;
+        }
+
+        // --- Draw texts on screen -------------------------
 
         for (int i = 0; i < texts.size(); i++) {
             TextOnScreen& text = texts[i];
@@ -1146,6 +1262,21 @@ int main() {
             DrawText(tooltip, pos.x, pos.y, 20, WHITE);
         }
         tooltip = nullptr;
+
+        if (has_illegal_machines && police_timer) {
+            double t = (game_time * 4) - int(game_time * 4);
+            
+            int py = 30;
+            DrawRectangle(0, py, 1024, 100, Color{0,0,0,200});
+            DrawText("ILLEGAL MACHINES", 100, py, 60, BLACK);
+            DrawText("ILLEGAL MACHINES", 104, py, 60, t < 0.5 ? RED : BLUE);
+            DrawText("ILLEGAL MACHINES", 108, py, 60, t > 0.5 ? RED : BLUE);
+
+            char buf[64] = {};
+            snprintf(buf, 64, "POLICE INCOMING IN %d:%.2d", int(police_timer->time_left / 60), int(floor(police_timer->time_left)) % 60);
+            DrawText(buf, 100,  py + 60, 40, t < 0.5 ? RED : BLUE);
+            DrawText(buf, 104,  py + 60, 40, t < 0.5 ? BLUE : RED);
+        }
 
         EndMode2D();
 
