@@ -26,6 +26,8 @@
 #define TILE_COUNT 6
 #define MAX_SLOT_REELS 10
 #define MAX_SLOT_ROWS  5
+#define UPGRADE_COST_INCREASE_FACTOR 1.3
+#define ROLL_COST_INCREASE_FACTOR 1.1
 
 typedef uint8_t  u8;
 typedef uint16_t u16;
@@ -37,6 +39,13 @@ typedef int32_t  i32;
 typedef int64_t  i64;
 
 typedef i64 Money;
+
+struct Timer {
+    const char* text;
+    const char* tooltip;
+    double time_left;
+    virtual void callback() = 0;
+};
 
 enum class ShopEntryType {
     Machine,
@@ -796,7 +805,7 @@ struct ShopEntry_Upgrade : ShopEntry {
             apply_upgrade(machine, current_upgarde_type);
         };
         current_upgarde_type = this->type;
-        _cost *= 2;
+        _cost *= UPGRADE_COST_INCREASE_FACTOR;
     }
 
     virtual const char* lock_reason() override {
@@ -867,7 +876,7 @@ int main() {
     shop_upgrades_weights.add(shop_entry_upgrade_speed, 1);
 
     shop_types_weights.add(ShopEntryType::Machine, 10);
-    shop_types_weights.add(ShopEntryType::Upgrade, 2);
+    shop_types_weights.add(ShopEntryType::Upgrade, 3);
 
     roll_shop();
 
@@ -1058,7 +1067,7 @@ int main() {
                     .font_size    = 40,
                     .enabled      = money >= roll_cost,
                 })) {
-                    roll_cost *= 1.2f;
+                    roll_cost *= ROLL_COST_INCREASE_FACTOR;
                     gain_money(-roll_cost, mouse);
                     roll_shop();
                 }
