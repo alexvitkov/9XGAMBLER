@@ -194,6 +194,8 @@ struct Slot {
     float             speed            = 300;
     float             row_height       = 40;
     int               current_spin_distance = 0;
+    double            last_tick        = 0;
+    double            tick_rate        = 0.3;
 
     float offsets[MAX_SLOT_REELS]       = {};
     int   upper_buffer[MAX_SLOT_REELS]  = {};
@@ -267,6 +269,15 @@ Texture tex_tile_j;
 Texture tex_tile_q;
 Texture tex_tile_k;
 
+// --- Sounds -------------------------------------------------
+
+Sound snd_upgrade;
+Sound snd_win[2];
+Sound snd_hat[48];
+Sound snd_reelstop;
+Music msc_police;
+Music msc_anticipation;
+int msc_anticipation_count = 0;
 
 // --- Game state ---------------------------------------------
 
@@ -366,9 +377,29 @@ Rectangle Slot::get_reel_rect(int reel) {
     };
 }
 
+void play_tick_sound() {
+    static int x = 0;
+    x++;
+    if (x >= 48) x = 0;
+    PlaySound(snd_hat[x]);
+}
+
+void play_win_sound() {
+    static int x = 0;
+    x++;
+    if (x >= 2) x = 0;
+    PlaySound(snd_win[x]);
+}
+
+
 void Slot::update() {
     if (spinning) {
         spin_time += dt;
+
+        if (game_time - last_tick > tick_rate) {
+            play_tick_sound();
+            last_tick = game_time;
+        }
 
         bool done = true;
         for (int reel = 0; reel < reels; reel++) {
@@ -444,6 +475,7 @@ SlotMachine::SlotMachine() {
 
     slot.on_reel_stop = [](Slot* slot, int reel) {
         slot->machine->on_reel_stop(reel);
+        PlaySound(snd_reelstop);
     };
 
     slot.on_stop = [](Slot* slot) {
@@ -467,6 +499,9 @@ void SlotMachine::upgrade(UpgradeType type) {
         case UpgradeType::Speed: {
             slot.speed *= 1.3;
             slot.reel_offset_time /= 1.3;
+            slot.tick_rate /= 1.1;
+            if (slot.tick_rate < 0.05)
+                slot.tick_rate = 0.05;
             break;
         }
         case UpgradeType::Double_Stake: {
@@ -563,6 +598,7 @@ struct M1X1 : SlotMachine {
         payouts = { 0, 3, 7, 15, 20 };
         slot.weights = { {0, 23}, {1,7}, {2,5}, {3,3}, {4,2} };
         texture = tex_m1x1;
+        slot.tick_rate = 0.15;
 
         slot.tiles = {
             { .id = 0, .texture = tex_tile_dot },
@@ -602,6 +638,7 @@ struct M3X1 : SlotMachine {
         texture = tex_m3x1;
         payouts = { 20, 100, 200, 5000 };
         slot.weights = {{0,10}, {1,5}, {2,3}, {3,1}};
+        slot.tick_rate = 0.15;
 
         slot.tiles = {
             { .id = 0, .texture = tex_tile_orange  },
@@ -630,13 +667,19 @@ struct M3X1 : SlotMachine {
         if (reel == 1 && slot.buffer.at(0,0) == slot.buffer.at(1,0)) {
             slot.current_spin_distance += 20;
             anticipation = true;
+            if (msc_anticipation_count == 0) PlayMusicStream(msc_anticipation);
+            msc_anticipation_count++;
         }
     }
 
     virtual void on_stop() override {
         SlotMachine::on_stop();
         last_auto_click_time = game_time;
-        anticipation = false;
+        if (anticipation) {
+            anticipation = false;
+            msc_anticipation_count--;
+            if (msc_anticipation_count == 0) StopMusicStream(msc_anticipation);
+        }
     }
 
     virtual void draw_slot() override {
@@ -665,6 +708,7 @@ struct Timer_Police : Timer {
         }
         police_timer = nullptr;
         has_illegal_machines = false;
+        StopMusicStream(msc_police);
         return false;
     }
 };
@@ -691,6 +735,7 @@ struct Timer_Tax : Timer {
 
 void gain_money(Money amount, Vector2 pos) {
     if (amount == 0) return;
+    if (amount > 0) play_win_sound();
 
     pos.y -= 10;
     money += amount;
@@ -746,6 +791,7 @@ void go_to_screen(GameScreen _screen) {
 void buy_spot(int i) {
     assert(!spot_unlocked[i]);
     if (!spot_unlocked[i]) {
+        PlaySound(snd_upgrade);
         gain_money(-spot_prices[i], mouse);
         spot_unlocked[i] = true;
     }
@@ -785,10 +831,13 @@ void check_illegal_machines() {
         police_timer = new Timer_Police();
         police_timer->time_left = POLICE_TIME;
         timers.push_back(police_timer);
+        PlayMusicStream(msc_police);
     }
 }
 
 void apply_upgrade(Machine* machine, UpgradeType type) {
+    PlaySound(snd_upgrade);
+
     select_machine = false;
     machine->upgrade(type);
 
@@ -901,6 +950,7 @@ struct ShopEntry_Upgrade : ShopEntry {
 int main() {
     SetConfigFlags(/*FLAG_VSYNC_HINT  | */ FLAG_WINDOW_RESIZABLE);
     InitWindow(screen_width, screen_height, GAME_NAME);
+    InitAudioDevice();
     SetTargetFPS(60);
 
     // --- Load Assets --------------------------------------------
@@ -921,6 +971,24 @@ int main() {
     tex_tile_j     = LoadTexture("assets/tile_j.png");
     tex_tile_q     = LoadTexture("assets/tile_q.png");
     tex_tile_k     = LoadTexture("assets/tile_k.png");
+
+    snd_upgrade = LoadSound("assets/upgrade.wav");
+    snd_win[0] = LoadSound("assets/win1.wav");
+    snd_win[1] = LoadSound("assets/win2.wav");
+
+    for (int i = 0; i < 48; i++) {
+        snd_hat[i] = LoadSound("assets/hat.wav");
+        SetSoundPitch(snd_hat[i], GetRandomValue(0, 100) / 100.0f * 0.1 + 0.9f);
+        SetSoundVolume(snd_hat[i], GetRandomValue(0, 100) / 100.0f * 0.3 + 0.3f);
+    }
+    snd_reelstop = LoadSound("assets/reelstop.wav");
+    msc_police = LoadMusicStream("assets/police.wav");
+    msc_police.looping = true;
+    SetMusicVolume(msc_police, 0.3);
+
+    msc_anticipation = LoadMusicStream("assets/anticipation.wav");
+    msc_anticipation.looping = true;
+    SetMusicVolume(msc_anticipation, 0.3);
 
     // --- Init gameplay ------------------------------------------
 
@@ -972,6 +1040,9 @@ int main() {
 
         camera = {
         };
+
+        if (police_timer) UpdateMusicStream(msc_police);
+        if (msc_anticipation_count > 0) UpdateMusicStream(msc_anticipation);
 
         // --- Update viewport ----------------------------------------
         {
